@@ -1,0 +1,104 @@
+# Prod overlay — targets a small self-hosted k3s cluster (e.g. the
+# Oracle Cloud Always Free ARM VM the README's hosted-demo runbook
+# describes, or any other single-node k3s).
+#
+# Usage (once `secrets.env` is populated from secrets.env.example):
+#   kubectl apply -k infra/k8s/overlays/prod
+#
+# Differences from base:
+#   - replicas = 2 for stateless services (web, chat-service,
+#     ingestion-service, insights-api); consumers stay at 1
+#   - StatefulSet PVCs request the k3s default `local-path`
+#     (hostPath-backed) StorageClass with larger sizes
+#   - Ingress patched to a real (placeholder) hostname with
+#     cert-manager Let's Encrypt annotations
+#   - secrets generated from a gitignored secrets.env file
+#   - image tags should be pinned (the placeholder `ollive/<svc>:dev`
+#     in base is fine for the take-home but should be replaced before
+#     real deployment — see images: section below)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ollive
+
+resources:
+  - ../../base
+
+# Replace placeholder images with real registry tags before deploying.
+# Leaving the :dev placeholders in here documents the seam without
+# committing a real registry to the repo.
+images:
+  - name: ollive/chat-service
+    newTag: dev
+  - name: ollive/ingestion-service
+    newTag: dev
+  - name: ollive/inference-consumer
+    newTag: dev
+  - name: ollive/app-log-consumer
+    newTag: dev
+  - name: ollive/insights-api
+    newTag: dev
+  - name: ollive/web
+    newTag: dev
+
+patches:
+  # Stateless services -> 2 replicas
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+    target:
+      kind: Deployment
+      name: chat-service
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+    target:
+      kind: Deployment
+      name: ingestion-service
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+    target:
+      kind: Deployment
+      name: insights-api
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+    target:
+      kind: Deployment
+      name: web
+
+  # StatefulSet storage: pin to k3s `local-path` (hostPath) StorageClass.
+  - path: patches/postgres-hostpath.yaml
+    target:
+      kind: StatefulSet
+      name: postgres
+  - path: patches/clickhouse-hostpath.yaml
+    target:
+      kind: StatefulSet
+      name: clickhouse
+  - path: patches/valkey-hostpath.yaml
+    target:
+      kind: StatefulSet
+      name: valkey
+
+  # Ingress hostname + TLS.
+  - path: patches/ingress-host.yaml
+    target:
+      kind: Ingress
+      name: ollive
+
+# Real secrets come from a gitignored secrets.env (see
+# secrets.env.example). If the file is missing, kustomize build will
+# fail loudly — that's the desired behaviour.
+secretGenerator:
+  - name: ollive-secrets
+    envs:
+      - secrets.env
+
+generatorOptions:
+  disableNameSuffixHash: true

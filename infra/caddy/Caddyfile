@@ -1,0 +1,31 @@
+# Caddy reverse proxy for the hosted demo.
+# Hostname is the IP-encoded nip.io domain (auto-resolves to the VM IP).
+# Caddy handles Let's Encrypt automatically.
+
+{$DOMAIN} {
+    # Backend chat: /api/chat/auth/login → chat-service:/auth/login etc.
+    # chat-service mounts routers at root, so strip the /api/chat prefix.
+    handle_path /api/chat/* {
+        reverse_proxy chat-service:8000
+    }
+
+    # Insights API: /api/insights/summary → insights-api:/insights/summary
+    # The insights API mounts everything under /insights/ already, so KEEP
+    # the prefix — just rewrite /api/insights/foo → /insights/foo.
+    handle /api/insights/* {
+        uri strip_prefix /api
+        reverse_proxy insights-api:8003
+    }
+
+    # Ingestion: /api/ingest/v1/logs → ingestion-service:/v1/logs
+    handle_path /api/ingest/* {
+        reverse_proxy ingestion-service:8001
+    }
+
+    # Everything else → Next.js
+    handle {
+        reverse_proxy web:3000
+    }
+
+    encode gzip zstd
+}

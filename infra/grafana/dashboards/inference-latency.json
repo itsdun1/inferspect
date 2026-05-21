@@ -1,0 +1,211 @@
+{
+  "uid": "ollive-inference-latency",
+  "title": "Inference Latency",
+  "tags": ["ollive"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 0,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "templating": {
+    "list": [
+      {
+        "name": "model",
+        "label": "Model",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "clickhouse-ollive"
+        },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": "",
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [],
+        "query": {
+          "refId": "model",
+          "rawSql": "SELECT DISTINCT model FROM ollive.inference_logs ORDER BY model",
+          "format": "table"
+        },
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Current p95 (all models)",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-ollive"
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 2000 },
+              { "color": "red", "value": 5000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse-ollive"
+          },
+          "rawSql": "SELECT quantileMerge(0.95)(p95_latency_state) AS p95_ms FROM ollive.mv_inference_5m WHERE bucket >= $__fromTime AND bucket <= $__toTime",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Current p95 per provider",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-ollive"
+      },
+      "gridPos": { "h": 4, "w": 18, "x": 6, "y": 0 },
+      "options": {
+        "reduceOptions": { "values": true, "calcs": ["lastNotNull"], "fields": "" },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 2000 },
+              { "color": "red", "value": 5000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse-ollive"
+          },
+          "rawSql": "SELECT provider, quantileMerge(0.95)(p95_latency_state) AS p95_ms FROM ollive.mv_inference_5m WHERE bucket >= $__fromTime AND bucket <= $__toTime GROUP BY provider ORDER BY provider",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Latency p50 / p95 / p99 per model",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-ollive"
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse-ollive"
+          },
+          "rawSql": "SELECT bucket AS time, concat(model, ' p50') AS metric, quantileMerge(0.5)(p50_latency_state) AS value FROM ollive.mv_inference_5m WHERE bucket >= $__fromTime AND bucket <= $__toTime AND (model IN (${model:sqlstring}) OR length([${model:sqlstring}]) = 0) GROUP BY bucket, model UNION ALL SELECT bucket AS time, concat(model, ' p95') AS metric, quantileMerge(0.95)(p95_latency_state) AS value FROM ollive.mv_inference_5m WHERE bucket >= $__fromTime AND bucket <= $__toTime AND (model IN (${model:sqlstring}) OR length([${model:sqlstring}]) = 0) GROUP BY bucket, model UNION ALL SELECT bucket AS time, concat(model, ' p99') AS metric, quantileMerge(0.99)(p99_latency_state) AS value FROM ollive.mv_inference_5m WHERE bucket >= $__fromTime AND bucket <= $__toTime AND (model IN (${model:sqlstring}) OR length([${model:sqlstring}]) = 0) GROUP BY bucket, model ORDER BY time",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "TTFT p95 per model",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-ollive"
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 14 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse-ollive"
+          },
+          "rawSql": "SELECT bucket AS time, model AS metric, quantileMerge(0.95)(p95_ttft_state) AS value FROM ollive.mv_inference_5m WHERE bucket >= $__fromTime AND bucket <= $__toTime AND (model IN (${model:sqlstring}) OR length([${model:sqlstring}]) = 0) GROUP BY bucket, model ORDER BY time",
+          "format": "time_series"
+        }
+      ]
+    }
+  ]
+}

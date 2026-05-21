@@ -1,0 +1,42 @@
+# Prod ingress patch: real hostname + cert-manager Let's Encrypt
+# annotation. `chat.example.com` is a PLACEHOLDER — replace with your
+# actual hostname before deploying.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ollive
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - chat.example.com
+      secretName: ollive-tls
+  rules:
+    - host: chat.example.com
+      http:
+        paths:
+          - path: /api/chat
+            pathType: Prefix
+            backend:
+              service:
+                name: chat-service
+                port:
+                  number: 8000
+          - path: /api/insights
+            pathType: Prefix
+            backend:
+              service:
+                name: insights-api
+                port:
+                  number: 8003
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 3000

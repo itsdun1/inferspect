@@ -1,0 +1,16 @@
+# Pin Postgres PVC size for the free-tier VM and request the default
+# (hostPath-backed) StorageClass that k3s ships with (`local-path`).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 10Gi

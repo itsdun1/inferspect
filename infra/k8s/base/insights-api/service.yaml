@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: insights-api
+  labels:
+    app.kubernetes.io/name: insights-api
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: insights-api
+  ports:
+    - name: http
+      port: 8003
+      targetPort: 8003

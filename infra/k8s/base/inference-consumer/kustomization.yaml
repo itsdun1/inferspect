@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Consumers are FastStream workers — they subscribe to Valkey Streams and
+# don't expose HTTP, so no Service.
+resources:
+  - deployment.yaml

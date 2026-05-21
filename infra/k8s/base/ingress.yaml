@@ -1,0 +1,35 @@
+# Traefik Ingress (k3s ships Traefik as the default IngressClass).
+# Overlays patch in hostnames and TLS annotations.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ollive
+  labels:
+    app.kubernetes.io/name: ollive-ingress
+    app.kubernetes.io/component: ingress
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /api/chat
+            pathType: Prefix
+            backend:
+              service:
+                name: chat-service
+                port:
+                  number: 8000
+          - path: /api/insights
+            pathType: Prefix
+            backend:
+              service:
+                name: insights-api
+                port:
+                  number: 8003
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 3000

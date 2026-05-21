@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat-service
+  labels:
+    app.kubernetes.io/name: chat-service
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chat-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chat-service
+        app.kubernetes.io/component: api
+    spec:
+      containers:
+        - name: chat-service
+          # NOTE: placeholder image — the prod overlay must override to a
+          # pinned registry tag, e.g. ghcr.io/ollive/chat-service:<sha>.
+          image: ollive/chat-service:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: chat-service-config
+            - secretRef:
+                name: ollive-secrets
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 8
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 8
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

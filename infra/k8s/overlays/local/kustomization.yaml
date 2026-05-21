@@ -1,0 +1,40 @@
+# Local development overlay (k3d / Docker Desktop / minikube).
+#
+# Usage:
+#   kubectl apply -k infra/k8s/overlays/local
+#
+# Differences from base:
+#   - replicas = 1 for everything (base default — no patch needed)
+#   - web exposed via NodePort 30080
+#   - no TLS, no Let's Encrypt
+#   - secrets generated from literals (NOT for prod)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ollive
+
+resources:
+  - ../../base
+
+patches:
+  - path: patches/web-nodeport.yaml
+    target:
+      kind: Service
+      name: web
+
+# Dev-only secrets — never use these literals in prod.
+secretGenerator:
+  - name: ollive-secrets
+    literals:
+      - POSTGRES_PASSWORD=ollivepass
+      - CLICKHOUSE_PASSWORD=ollivepass
+      - GRAFANA_PASSWORD=admin
+      - JWT_SECRET=local-dev-jwt-secret-change-me
+      - SDK_API_KEY=local-dev-sdk-key
+      - GEMINI_API_KEY=""
+      - OPENAI_API_KEY=""
+      - ANTHROPIC_API_KEY=""
+      - BOOTSTRAP_ADMIN_PASSWORD=change-me
+
+generatorOptions:
+  disableNameSuffixHash: true

@@ -1,0 +1,187 @@
+name: ollive
+
+# Production-style compose: builds the Python and Next.js images, wires them
+# together with the infra services, fronts everything with Caddy for HTTPS.
+# Used on the Oracle VM. For local dev, infra/docker-compose.yml only brings
+# up postgres + valkey + clickhouse.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ollive}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ollivepass}
+      POSTGRES_DB: ${POSTGRES_DB:-ollive}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ollive} -d ${POSTGRES_DB:-ollive}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ollive}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-ollivepass}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-ollive}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      # Native TCP via clickhouse-client — works inside the container even
+      # when HTTP loopback bind is flaky (seen on Oracle Cloud where IPv6
+      # init fails first and CH binds only on the docker network IP).
+      test: ["CMD-SHELL", "clickhouse-client --user $${CLICKHOUSE_USER:-ollive} --password $${CLICKHOUSE_PASSWORD:-ollivepass} -q 'SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  ingestion-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile.python
+    image: ollive/python:dev
+    restart: unless-stopped
+    environment:
+      VALKEY_URL: redis://valkey:6379/0
+      PII_ENABLED: "${PII_ENABLED:-false}"
+      SDK_API_KEY: "${SDK_API_KEY:-}"
+    command: ["uvicorn", "ingestion_service.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+  inference-consumer:
+    image: ollive/python:dev
+    restart: unless-stopped
+    environment:
+      VALKEY_URL: redis://valkey:6379/0
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ollive}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-ollivepass}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-ollive}
+    command: ["python", "-m", "faststream", "run", "inference_consumer.main:app"]
+    depends_on:
+      valkey:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+  app-log-consumer:
+    image: ollive/python:dev
+    restart: unless-stopped
+    environment:
+      VALKEY_URL: redis://valkey:6379/0
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ollive}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-ollivepass}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-ollive}
+    command: ["python", "-m", "faststream", "run", "app_log_consumer.main:app"]
+    depends_on:
+      valkey:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+  insights-api:
+    image: ollive/python:dev
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ollive}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-ollivepass}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-ollive}
+    command: ["uvicorn", "insights_api.main:app", "--host", "0.0.0.0", "--port", "8003"]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  chat-service:
+    image: ollive/python:dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-ollive}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ollivepass}
+      POSTGRES_DB: ${POSTGRES_DB:-ollive}
+      INGESTION_URL: http://ingestion-service:8001/v1/logs
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      JWT_SECRET: ${JWT_SECRET}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@ollive.demo}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-changeme}
+      COOKIE_SECURE: "true"
+      SDK_API_KEY: "${SDK_API_KEY:-}"
+    command: ["uvicorn", "chat_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingestion-service:
+        condition: service_started
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Chat base URL ends at /api/chat because the page calls /auth/login,
+        # /conversations, /chat (no leading /chat/ in code).
+        NEXT_PUBLIC_API_URL: https://${DOMAIN}/api/chat
+        # Insights base ends at /api because the page calls /insights/summary
+        # etc. with the /insights/ prefix in code. Caddy's /api/insights/*
+        # matcher still routes correctly.
+        NEXT_PUBLIC_INSIGHTS_URL: https://${DOMAIN}/api
+    image: ollive/web:dev
+    restart: unless-stopped
+    depends_on:
+      - chat-service
+      - insights-api
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+      - chat-service
+      - insights-api
+      - ingestion-service
+
+volumes:
+  postgres_data:
+  valkey_data:
+  clickhouse_data:
+  caddy_data:
+  caddy_config:

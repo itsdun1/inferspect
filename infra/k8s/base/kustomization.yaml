@@ -1,0 +1,52 @@
+# Base Kustomize manifests for the Ollive LLM observability platform.
+#
+# This base is environment-agnostic. Apply overlays (overlays/local or
+# overlays/prod) rather than this base directly — overlays patch in
+# replica counts, storage, ingress hostnames, and secrets.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ollive
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: ollive-platform
+      app.kubernetes.io/managed-by: kustomize
+
+resources:
+  - namespace.yaml
+  - postgres
+  - valkey
+  - clickhouse
+  - grafana
+  - chat-service
+  - ingestion-service
+  - inference-consumer
+  - app-log-consumer
+  - insights-api
+  - web
+  - ingress.yaml
+
+# ConfigMap for ClickHouse init schema — sourced directly from the same
+# init.sql consumed by docker-compose so there is only one source of truth.
+# The `../../clickhouse/init.sql` path escapes the kustomization root, so
+# overlays/the build must pass --load-restrictor=LoadRestrictionsNone
+# (kubectl kustomize accepts this as a flag).
+configMapGenerator:
+  - name: clickhouse-init
+    files:
+      - init.sql=../../clickhouse/init.sql
+  - name: grafana-datasources
+    files:
+      - clickhouse.yaml=../../grafana/provisioning/datasources/clickhouse.yaml
+  - name: grafana-dashboards-provisioning
+    files:
+      - default.yaml=../../grafana/provisioning/dashboards/default.yaml
+  - name: grafana-dashboards
+    files:
+      - inference-latency.json=../../grafana/dashboards/inference-latency.json
+      - inference-throughput.json=../../grafana/dashboards/inference-throughput.json
+
+generatorOptions:
+  disableNameSuffixHash: true

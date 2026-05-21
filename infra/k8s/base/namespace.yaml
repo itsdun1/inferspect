@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ollive
+  labels:
+    app.kubernetes.io/name: ollive
+    app.kubernetes.io/part-of: ollive-platform

@@ -69,6 +69,7 @@ Event based architecture
 PII redaction
 Deploy application on self hosted k8s
 Frontend
+
 The UI allows following:
 Cancel a conversation
 List conversations

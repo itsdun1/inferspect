@@ -46,6 +46,9 @@ secrets.env
 *.local.yaml
 kubeconfig*
 
+# Deployment state (Oracle Cloud OCIDs etc.)
+.oracle/
+
 # Editors / OS
 .vscode/
 .idea/
