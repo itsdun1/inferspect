@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.eggs/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# uv / poetry
+.uv-cache/
+poetry.lock.bak
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.turbo/
+.swc/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets.env
+
+# Docker / k8s
+*.local.yaml
+kubeconfig*
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs / data
+*.log
+logs/
+data/
+tmp/
+
+# Build artifacts
+.cache/
+.parcel-cache/
