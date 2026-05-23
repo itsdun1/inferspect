@@ -119,7 +119,13 @@ services:
         condition: service_healthy
 
   chat-service:
-    image: ollive/python:dev
+    # Built from a STANDALONE Dockerfile that pip-installs the SDK from PyPI
+    # (inferspect-sdk[langchain]) — proves chat-service consumes the SDK like
+    # any third-party customer would, with no workspace coupling.
+    build:
+      context: ..
+      dockerfile: apps/chat-service/Dockerfile
+    image: ollive/chat-service:pypi
     restart: unless-stopped
     environment:
       POSTGRES_HOST: postgres
