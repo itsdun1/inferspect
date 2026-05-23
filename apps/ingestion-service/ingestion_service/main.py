@@ -13,6 +13,7 @@ from ingestion_service.config import settings
 from ingestion_service.controllers import health_controller, ingest_controller
 from ingestion_service.repositories.idempotency_repository import IdempotencyRepository
 from ingestion_service.repositories.valkey_publisher import ValkeyPublisher
+from ingestion_service.services.auth_service import ApiKeyResolver
 from ingestion_service.services.ingest_service import IngestService
 from ingestion_service.services.pii_service import PIIService
 
@@ -36,12 +37,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         template=settings.pii_anonymize_template,
     )
     ingest_service = IngestService(publisher=publisher, idempotency=idempotency, pii=pii)
+    api_key_resolver = ApiKeyResolver(settings.sdk_api_keys_json)
 
     app.state.client = client
     app.state.publisher = publisher
     app.state.idempotency = idempotency
     app.state.pii = pii
     app.state.ingest_service = ingest_service
+    app.state.api_key_resolver = api_key_resolver
 
     log.info("ingestion-service startup complete")
     try:

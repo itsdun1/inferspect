@@ -15,7 +15,7 @@ members = [
 ]
 
 [tool.uv.sources]
-chatbot-sdk = { workspace = true }
+inferspect-sdk = { workspace = true }
 
 [dependency-groups]
 dev = [

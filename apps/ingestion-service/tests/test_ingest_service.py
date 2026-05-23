@@ -71,6 +71,7 @@ async def test_accepts_and_publishes_valid_event(pii_disabled):
 
     payload = _inference_payload()
     res = await svc.ingest_batch(
+        client="alice-corp",
         service="chat-service",
         sdk_version="0.1.0",
         events=[payload],
@@ -85,6 +86,8 @@ async def test_accepts_and_publishes_valid_event(pii_disabled):
     assert log_type == LogType.INFERENCE
     assert event["request_id"] == payload["request_id"]
     assert "received_at" in event
+    # Ingestion stamps the resolved tenant on every published event.
+    assert event["client"] == "alice-corp"
 
 
 async def test_duplicate_is_skipped(pii_disabled):
@@ -95,10 +98,12 @@ async def test_duplicate_is_skipped(pii_disabled):
     payload = _inference_payload()
 
     res1 = await svc.ingest_batch(
+        client="alice-corp",
         service="chat-service", sdk_version="0.1.0", events=[payload],
         received_at=datetime.now(UTC).isoformat(),
     )
     res2 = await svc.ingest_batch(
+        client="alice-corp",
         service="chat-service", sdk_version="0.1.0", events=[payload],
         received_at=datetime.now(UTC).isoformat(),
     )
@@ -117,6 +122,7 @@ async def test_rejects_unknown_log_type(pii_disabled):
     )
     bad = {"log_type": "garbage"}
     res = await svc.ingest_batch(
+        client="alice-corp",
         service="x", sdk_version="0", events=[bad],
         received_at=datetime.now(UTC).isoformat(),
     )
@@ -132,6 +138,7 @@ async def test_publish_failure_raises_publish_error(pii_disabled):
     )
     with pytest.raises(PublishError):
         await svc.ingest_batch(
+            client="alice-corp",
             service="x", sdk_version="0",
             events=[_inference_payload()],
             received_at=datetime.now(UTC).isoformat(),
@@ -148,6 +155,7 @@ async def test_mixed_batch_partial_success(pii_disabled):
     del bad["provider"]  # invalid
 
     res = await svc.ingest_batch(
+        client="alice-corp",
         service="x", sdk_version="0", events=[good, bad],
         received_at=datetime.now(UTC).isoformat(),
     )
@@ -155,3 +163,22 @@ async def test_mixed_batch_partial_success(pii_disabled):
     assert res.accepted == 1
     assert res.rejected == 1
     assert len(pub.published) == 1
+
+
+async def test_client_field_stamped_on_published_events(pii_disabled):
+    """Smoke test: every event published carries the resolved client tag."""
+    pub = _FakePublisher()
+    idem = _FakeIdempotency()
+    svc = IngestService(publisher=pub, idempotency=idem, pii=pii_disabled)
+
+    await svc.ingest_batch(
+        client="alice-corp",
+        service="chat-service",
+        sdk_version="0.1.0",
+        events=[_inference_payload()],
+        received_at=datetime.now(UTC).isoformat(),
+    )
+
+    assert len(pub.published) == 1
+    _, event = pub.published[0]
+    assert event["client"] == "alice-corp"

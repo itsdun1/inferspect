@@ -32,10 +32,20 @@ from chatbot_sdk.transport import BatchedLogTransport
 
 
 class LogShippingProcessor:
-    def __init__(self, *, transport: BatchedLogTransport, service: str, min_level: str = "INFO") -> None:
+    def __init__(
+        self,
+        *,
+        transport: BatchedLogTransport,
+        service: str,
+        min_level: str = "INFO",
+        pii_redact: bool = True,
+        pii_recognizers: list[str] | None = None,
+    ) -> None:
         self.transport = transport
         self.service = service
         self._min_level = _level_to_int(min_level)
+        self._pii_redact = pii_redact
+        self._pii_recognizers = pii_recognizers
 
     def __call__(self, logger: Any, method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
         level = str(event_dict.get("level", method_name)).upper()
@@ -50,6 +60,11 @@ class LogShippingProcessor:
                 for k, v in event_dict.items()
                 if k not in {"event", "level", "timestamp", "logger"}
             }
+            if self._pii_redact:
+                from chatbot_sdk.pii import redact_dict, redact_text
+
+                message = redact_text(message, self._pii_recognizers)
+                attrs = redact_dict(attrs, self._pii_recognizers)
             log = ApplicationLog(
                 schema_version=SCHEMA_VERSION,
                 log_type=LogType.APPLICATION,

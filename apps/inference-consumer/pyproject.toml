@@ -9,7 +9,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.4",
     "structlog>=24.1",
-    "chatbot-sdk",
+    "inferspect-sdk",
 ]
 
 [build-system]

@@ -34,7 +34,9 @@ MIN_BASELINE_BUCKETS = 3
 LOOKBACK = timedelta(hours=1)
 
 
-async def anomalies(client: Any, *, window: str) -> dict[str, Any]:
+async def anomalies(
+    ch_client: Any, *, window: str, client: str | None = None
+) -> dict[str, Any]:
     # We expand the query window backwards by LOOKBACK so the first few buckets
     # inside the user-requested window still have a baseline.
     window_delta = parse_window(window)
@@ -43,7 +45,7 @@ async def anomalies(client: Any, *, window: str) -> dict[str, Any]:
     since_extended = since_for(extended_window_str)
     user_since = since_for(window)
 
-    rows = await repo.anomaly_series(client, since=since_extended)
+    rows = await repo.anomaly_series(ch_client, since=since_extended, client=client)
 
     # Group rows by (provider, model) and sort by bucket within each group.
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)

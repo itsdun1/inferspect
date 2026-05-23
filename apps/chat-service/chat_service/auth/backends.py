@@ -13,7 +13,7 @@ from chat_service.config import settings
 
 
 cookie_transport = CookieTransport(
-    cookie_name="ollive_session",
+    cookie_name="chat_session",
     cookie_max_age=settings.jwt_lifetime_seconds,
     cookie_secure=settings.cookie_secure,
     cookie_httponly=True,

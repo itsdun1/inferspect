@@ -105,3 +105,41 @@ async def test_summary_computes_error_rate_when_requests_present():
     assert res["error_rate"] == pytest.approx(0.04)
     assert res["total_requests"] == 100
     assert res["p95_latency"] == 350.0
+
+
+async def test_client_filter_appears_in_sql_when_provided():
+    """Filtering by client should add an extra WHERE clause + parameter.
+
+    No filter → no ``client`` predicate, no ``client`` parameter.
+    With filter → SQL contains ``client = {client:String}`` AND the value
+    is parameterized (not interpolated into the string).
+    """
+    rows = [{"bucket": "2026-05-21T10:00:00", "req_count": 1, "tokens": 1,
+             "prompt_tokens": 1, "completion_tokens": 0}]
+
+    # Aggregate (no filter).
+    agg_client = FakeCHClient([rows])
+    await metrics_service.throughput(agg_client, window="1h", group="none")
+    agg_sql, agg_params = agg_client.calls[0]
+    assert "client = {client:String}" not in agg_sql
+    assert "client" not in agg_params
+
+    # Scoped (with filter).
+    scoped_client = FakeCHClient([rows])
+    await metrics_service.throughput(
+        scoped_client, window="1h", group="none", client="acme"
+    )
+    scoped_sql, scoped_params = scoped_client.calls[0]
+    assert "client = {client:String}" in scoped_sql
+    assert scoped_params["client"] == "acme"
+
+
+async def test_client_filter_threads_through_summary():
+    rows = [{"total_requests": 0, "total_tokens": 0, "total_cost_usd": 0.0,
+             "total_errors": 0, "p50_latency": 0, "p95_latency": 0}]
+    client = FakeCHClient([rows])
+
+    await metrics_service.summary(client, window="1h", client="acme")
+    sql, params = client.calls[0]
+    assert "client = {client:String}" in sql
+    assert params["client"] == "acme"

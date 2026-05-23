@@ -1,7 +1,7 @@
 [project]
 name = "insights-api"
 version = "0.1.0"
-description = "Analytics endpoints over ClickHouse: latency, throughput, errors, cost, tools, sessions."
+description = "Analytics endpoints over ClickHouse + operator console auth (Postgres-backed)."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
@@ -10,6 +10,10 @@ dependencies = [
     "pydantic-settings>=2.4",
     "clickhouse-connect[async]>=0.7",
     "structlog>=24.1",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "fastapi-users[sqlalchemy]>=13.0",
+    "inferspect-sdk",
 ]
 
 [build-system]

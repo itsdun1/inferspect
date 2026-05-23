@@ -1,30 +1,64 @@
 # Caddy reverse proxy for the hosted demo.
-# Hostname is the IP-encoded nip.io domain (auto-resolves to the VM IP).
-# Caddy handles Let's Encrypt automatically.
+#
+# Two independent subdomains so the two surfaces have independent cookies,
+# brands, and deploy cadences:
+#   - chat.${DOMAIN}      → end-user chat product (web-chat)
+#   - insights.${DOMAIN}  → operator console (web-insights)
+#
+# Each subdomain gets its own automatic Let's Encrypt cert (Caddy default).
+# The cookies are scoped per subdomain (no `Domain=.${DOMAIN}`), so
+# `chat_session` lives only on chat.* and `console_session` lives only on
+# insights.* — signing out of one does not affect the other.
 
-{$DOMAIN} {
-    # Backend chat: /api/chat/auth/login → chat-service:/auth/login etc.
+# ─── End-user chat surface ────────────────────────────────────────────
+chat.{$DOMAIN} {
+    # /api/chat/auth/login → chat-service:/auth/login
     # chat-service mounts routers at root, so strip the /api/chat prefix.
     handle_path /api/chat/* {
         reverse_proxy chat-service:8000
     }
 
-    # Insights API: /api/insights/summary → insights-api:/insights/summary
-    # The insights API mounts everything under /insights/ already, so KEEP
-    # the prefix — just rewrite /api/insights/foo → /insights/foo.
+    # /api/logs/* → ingestion-service. The chat UI itself doesn't currently
+    # POST app logs, but exposing this here keeps SDK-from-browser as a
+    # future option without another Caddy round-trip.
+    handle_path /api/logs/* {
+        reverse_proxy ingestion-service:8001
+    }
+
+    # Everything else → web-chat Next.js (port 3000 inside the container).
+    handle {
+        reverse_proxy web-chat:3000
+    }
+
+    encode gzip zstd
+}
+
+# ─── Operator / insights console ──────────────────────────────────────
+insights.{$DOMAIN} {
+    # /api/insights/summary → insights-api:/insights/summary
+    # The insights API mounts everything under /insights/, so KEEP the
+    # prefix — just rewrite /api/insights/foo → /insights/foo.
     handle /api/insights/* {
         uri strip_prefix /api
         reverse_proxy insights-api:8003
     }
 
-    # Ingestion: /api/ingest/v1/logs → ingestion-service:/v1/logs
-    handle_path /api/ingest/* {
-        reverse_proxy ingestion-service:8001
+    # /api/admin/* and /api/auth/* → insights-api (operator login + admin
+    # endpoints live there since Phase D). Use `handle` + `uri strip_prefix`
+    # so we strip `/api` but keep `/admin/*` / `/auth/*` for insights-api,
+    # which mounts those routers at root.
+    handle /api/admin/* {
+        uri strip_prefix /api
+        reverse_proxy insights-api:8003
+    }
+    handle /api/auth/* {
+        uri strip_prefix /api
+        reverse_proxy insights-api:8003
     }
 
-    # Everything else → Next.js
+    # Everything else → web-insights Next.js.
     handle {
-        reverse_proxy web:3000
+        reverse_proxy web-insights:3000
     }
 
     encode gzip zstd

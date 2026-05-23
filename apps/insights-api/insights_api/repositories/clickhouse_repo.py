@@ -8,6 +8,10 @@ User-controlled values are passed via parameterized queries (``parameters=``)
 so we never interpolate into SQL strings. The ``group_by`` knob is the one
 exception — it's a column name and is validated against a finite allow-list
 by the service layer before we get here.
+
+Multi-tenancy: every aggregation accepts an optional ``client`` argument. When
+provided, an additional ``client = {client:String}`` predicate is added to
+the WHERE clause to scope the query to a single tenant.
 """
 
 from __future__ import annotations
@@ -33,12 +37,18 @@ async def _named_results(client: _AsyncCHClient, sql: str, params: dict[str, Any
     return list(result.named_results())
 
 
+def _client_filter(client: str | None) -> str:
+    """Return an extra ``AND client = {client:String}`` clause when scoped."""
+    return " AND client = {client:String}" if client is not None else ""
+
+
 # ─── /insights/latency ────────────────────────────────────────────
 async def latency_buckets(
-    client: _AsyncCHClient,
+    ch_client: _AsyncCHClient,
     *,
     since: datetime,
     group: str = "model",
+    client: str | None = None,
 ) -> list[dict[str, Any]]:
     """p50/p95/p99 latency per (provider, group) per 5-min bucket from mv_inference_5m."""
     # ``group`` is validated upstream (see metrics_service); allow-list is
@@ -56,19 +66,23 @@ async def latency_buckets(
             quantileMerge(0.99)(p99_latency_state) AS p99,
             countMerge(req_count_state)            AS req_count
         FROM mv_inference_5m
-        WHERE bucket >= {{since:DateTime64(3)}}
+        WHERE bucket >= {{since:DateTime64(3)}}{_client_filter(client)}
         GROUP BY bucket {group_by_tail}
         ORDER BY bucket ASC {group_by_tail}
     """
-    return await _named_results(client, sql, {"since": since})
+    params: dict[str, Any] = {"since": since}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
 
 
 # ─── /insights/throughput ─────────────────────────────────────────
 async def throughput_buckets(
-    client: _AsyncCHClient,
+    ch_client: _AsyncCHClient,
     *,
     since: datetime,
     group: str = "none",
+    client: str | None = None,
 ) -> list[dict[str, Any]]:
     """Requests + tokens per 5-min bucket, optionally grouped."""
     group_cols = _group_columns(group)
@@ -84,44 +98,50 @@ async def throughput_buckets(
             sumMerge(prompt_tokens_state)     AS prompt_tokens,
             sumMerge(completion_tokens_state) AS completion_tokens
         FROM mv_inference_5m
-        WHERE bucket >= {{since:DateTime64(3)}}
+        WHERE bucket >= {{since:DateTime64(3)}}{_client_filter(client)}
         GROUP BY bucket {group_by_tail}
         ORDER BY bucket ASC {group_by_tail}
     """
-    return await _named_results(client, sql, {"since": since})
+    params: dict[str, Any] = {"since": since}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
 
 
 # ─── /insights/errors ─────────────────────────────────────────────
 async def error_counts(
-    client: _AsyncCHClient,
+    ch_client: _AsyncCHClient,
     *,
     since: datetime,
     sample_size: int = 5,
+    client: str | None = None,
 ) -> list[dict[str, Any]]:
     """Error counts grouped by (error_code, provider), with up to N sample messages."""
-    sql = """
+    sql = f"""
         SELECT
             coalesce(error_code, '') AS error_code,
             provider,
             count() AS error_count,
-            arraySlice(groupArray(error_message), 1, {sample_size:UInt32}) AS samples
+            arraySlice(groupArray(error_message), 1, {{sample_size:UInt32}}) AS samples
         FROM inference_logs
-        WHERE started_at >= {since:DateTime64(3)}
-          AND status = 'error'
+        WHERE started_at >= {{since:DateTime64(3)}}
+          AND status = 'error'{_client_filter(client)}
         GROUP BY error_code, provider
         ORDER BY error_count DESC
     """
-    return await _named_results(
-        client, sql, {"since": since, "sample_size": sample_size}
-    )
+    params: dict[str, Any] = {"since": since, "sample_size": sample_size}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
 
 
 # ─── /insights/cost ───────────────────────────────────────────────
 async def cost_by_group(
-    client: _AsyncCHClient,
+    ch_client: _AsyncCHClient,
     *,
     since: datetime,
     group: str = "model",
+    client: str | None = None,
 ) -> list[dict[str, Any]]:
     """Total spend per (model | provider) over the window."""
     group_cols = _group_columns(group) or ["model"]
@@ -133,41 +153,49 @@ async def cost_by_group(
             countMerge(req_count_state) AS req_count,
             sumMerge(tokens_state)     AS tokens
         FROM mv_inference_5m
-        WHERE bucket >= {{since:DateTime64(3)}}
+        WHERE bucket >= {{since:DateTime64(3)}}{_client_filter(client)}
         GROUP BY {select_group}
         ORDER BY cost_usd DESC
     """
-    return await _named_results(client, sql, {"since": since})
+    params: dict[str, Any] = {"since": since}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
 
 
 async def top_cost_conversations(
-    client: _AsyncCHClient,
+    ch_client: _AsyncCHClient,
     *,
     since: datetime,
     limit: int = 10,
+    client: str | None = None,
 ) -> list[dict[str, Any]]:
-    sql = """
+    sql = f"""
         SELECT
             conversation_id,
             sum(cost_usd)   AS cost_usd,
             sum(total_tokens) AS tokens,
             count()         AS req_count
         FROM inference_logs
-        WHERE started_at >= {since:DateTime64(3)}
+        WHERE started_at >= {{since:DateTime64(3)}}{_client_filter(client)}
         GROUP BY conversation_id
         ORDER BY cost_usd DESC
-        LIMIT {limit:UInt32}
+        LIMIT {{limit:UInt32}}
     """
-    return await _named_results(client, sql, {"since": since, "limit": limit})
+    params: dict[str, Any] = {"since": since, "limit": limit}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
 
 
 # ─── /insights/top-conversations ──────────────────────────────────
 async def top_conversations(
-    client: _AsyncCHClient,
+    ch_client: _AsyncCHClient,
     *,
     since: datetime,
     metric: str,
     limit: int = 20,
+    client: str | None = None,
 ) -> list[dict[str, Any]]:
     """Outlier conversations sorted by metric DESC. Caller validates ``metric``."""
     # metric is validated against an allow-list upstream.
@@ -185,21 +213,25 @@ async def top_conversations(
             count()        AS req_count,
             {metric_expr}  AS metric_value
         FROM inference_logs
-        WHERE started_at >= {{since:DateTime64(3)}}
+        WHERE started_at >= {{since:DateTime64(3)}}{_client_filter(client)}
         GROUP BY conversation_id, session_id
         ORDER BY metric_value DESC
         LIMIT {{limit:UInt32}}
     """
-    return await _named_results(client, sql, {"since": since, "limit": limit})
+    params: dict[str, Any] = {"since": since, "limit": limit}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
 
 
 # ─── /insights/sessions/{session_id} ──────────────────────────────
 async def session_inference_events(
-    client: _AsyncCHClient,
+    ch_client: _AsyncCHClient,
     *,
     session_id: str,
+    client: str | None = None,
 ) -> list[dict[str, Any]]:
-    sql = """
+    sql = f"""
         SELECT
             request_id,
             conversation_id,
@@ -221,18 +253,22 @@ async def session_inference_events(
             input_preview,
             output_preview
         FROM inference_logs
-        WHERE session_id = {id:UUID} OR conversation_id = {id:UUID}
+        WHERE (session_id = {{id:UUID}} OR conversation_id = {{id:UUID}}){_client_filter(client)}
         ORDER BY started_at ASC
     """
-    return await _named_results(client, sql, {"id": session_id})
+    params: dict[str, Any] = {"id": session_id}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
 
 
 async def session_tool_events(
-    client: _AsyncCHClient,
+    ch_client: _AsyncCHClient,
     *,
     session_id: str,
+    client: str | None = None,
 ) -> list[dict[str, Any]]:
-    sql = """
+    sql = f"""
         SELECT
             request_id,
             tool_call_id,
@@ -250,20 +286,24 @@ async def session_tool_events(
             result_preview,
             result_size_bytes
         FROM tool_executions
-        WHERE session_id = {id:UUID} OR conversation_id = {id:UUID}
+        WHERE (session_id = {{id:UUID}} OR conversation_id = {{id:UUID}}){_client_filter(client)}
         ORDER BY started_at ASC
     """
-    return await _named_results(client, sql, {"id": session_id})
+    params: dict[str, Any] = {"id": session_id}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
 
 
 # ─── /insights/summary ────────────────────────────────────────────
 async def summary_rollup(
-    client: _AsyncCHClient,
+    ch_client: _AsyncCHClient,
     *,
     since: datetime,
+    client: str | None = None,
 ) -> dict[str, Any]:
     """Single-row rollup of headline numbers over the window."""
-    sql = """
+    sql = f"""
         SELECT
             countMerge(req_count_state)             AS total_requests,
             sumMerge(tokens_state)                  AS total_tokens,
@@ -272,9 +312,12 @@ async def summary_rollup(
             quantileMerge(0.5)(p50_latency_state)   AS p50_latency,
             quantileMerge(0.95)(p95_latency_state)  AS p95_latency
         FROM mv_inference_5m
-        WHERE bucket >= {since:DateTime64(3)}
+        WHERE bucket >= {{since:DateTime64(3)}}{_client_filter(client)}
     """
-    rows = await _named_results(client, sql, {"since": since})
+    params: dict[str, Any] = {"since": since}
+    if client is not None:
+        params["client"] = client
+    rows = await _named_results(ch_client, sql, params)
     return rows[0] if rows else {
         "total_requests": 0,
         "total_tokens": 0,
@@ -287,15 +330,16 @@ async def summary_rollup(
 
 # ─── /insights/anomalies ──────────────────────────────────────────
 async def anomaly_series(
-    client: _AsyncCHClient,
+    ch_client: _AsyncCHClient,
     *,
     since: datetime,
+    client: str | None = None,
 ) -> list[dict[str, Any]]:
     """Per-(provider, model, bucket) latency + error count series for anomaly detection.
 
     The service layer computes z-scores on top of this.
     """
-    sql = """
+    sql = f"""
         SELECT
             bucket,
             provider,
@@ -304,24 +348,28 @@ async def anomaly_series(
             countMerge(req_count_state)            AS req_count,
             countMerge(error_count_state)          AS error_count
         FROM mv_inference_5m
-        WHERE bucket >= {since:DateTime64(3)}
+        WHERE bucket >= {{since:DateTime64(3)}}{_client_filter(client)}
         GROUP BY bucket, provider, model
         ORDER BY provider, model, bucket ASC
     """
-    return await _named_results(client, sql, {"since": since})
+    params: dict[str, Any] = {"since": since}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
 
 
 # ─── /insights/tools ──────────────────────────────────────────────
 async def tool_metrics(
-    client: _AsyncCHClient,
+    ch_client: _AsyncCHClient,
     *,
     since: datetime,
+    client: str | None = None,
 ) -> list[dict[str, Any]]:
     """Per-tool aggregated metrics from mv_tool_5m + a tool_executions fallback.
 
     We pull p50/p95 + call/error counts from the materialized view.
     """
-    sql = """
+    sql = f"""
         SELECT
             tool_name,
             countMerge(call_count_state)           AS call_count,
@@ -330,11 +378,14 @@ async def tool_metrics(
             countMerge(error_count_state)          AS error_count,
             sumMerge(bytes_state)                  AS total_bytes
         FROM mv_tool_5m
-        WHERE bucket >= {since:DateTime64(3)}
+        WHERE bucket >= {{since:DateTime64(3)}}{_client_filter(client)}
         GROUP BY tool_name
         ORDER BY call_count DESC
     """
-    return await _named_results(client, sql, {"since": since})
+    params: dict[str, Any] = {"since": since}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
 
 
 # ─── helpers ──────────────────────────────────────────────────────

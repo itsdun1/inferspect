@@ -52,6 +52,7 @@ INFERENCE_COLUMNS: list[str] = [
     "input_preview",
     "output_preview",
     "metadata",
+    "client",
 ]
 
 TOOL_EXECUTION_COLUMNS: list[str] = [
@@ -74,6 +75,7 @@ TOOL_EXECUTION_COLUMNS: list[str] = [
     "result_preview",
     "result_size_bytes",
     "metadata",
+    "client",
 ]
 
 
@@ -142,6 +144,10 @@ def _coerce(event: dict[str, Any], col: str) -> Any:
                                   "error_code", "error_message", "trace_id", "span_id",
                                   "parent_inference_request_id"}:
         return None
+    # Tenant tag — non-Nullable in CH, default empty string when absent
+    # (e.g. older events from before Phase C, or local dev with no key map).
+    if col == "client" and value is None:
+        return ""
     # Boolean → UInt8.
     if isinstance(value, bool):
         return 1 if value else 0

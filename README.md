@@ -35,11 +35,14 @@ JWT_SECRET=dev-secret BOOTSTRAP_ADMIN_EMAIL=admin@ollive.demo \
 BOOTSTRAP_ADMIN_PASSWORD=admin123 \
   uv run --package chat-service uvicorn chat_service.main:app --port 8000
 
-# Terminal 6 — frontend
-cd apps/web && npm install && npm run dev
+# Terminal 6 — frontends (npm workspaces — installs both apps + shared types)
+npm install
+npm run dev:chat       # web-chat on http://localhost:3000
+# (in another terminal)
+PORT=3002 npm run dev:insights  # web-insights on http://localhost:3002
 ```
 
-Open `http://localhost:3000`. The admin user is auto-created from env on chat-service startup; sign in with the credentials you placed in `.env`.
+Open `http://localhost:3000` for the end-user chat surface and `http://localhost:3002` for the operator console. The chat admin user is auto-created from `BOOTSTRAP_ADMIN_*` env on chat-service startup; the operator account is auto-created from `CONSOLE_BOOTSTRAP_*` env on insights-api startup.
 
 | Service     | URL                          | Credentials                 |
 |-------------|------------------------------|-----------------------------|

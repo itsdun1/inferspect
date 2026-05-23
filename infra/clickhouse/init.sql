@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS inference_logs (
     session_id              UUID,
     user_id                 Nullable(UUID),
     service                 LowCardinality(String),
+    client                  LowCardinality(String) DEFAULT '',
     provider                LowCardinality(String),
     model                   LowCardinality(String),
     started_at              DateTime64(3, 'UTC'),
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS tool_executions (
     session_id                      UUID,
     user_id                         Nullable(UUID),
     service                         LowCardinality(String),
+    client                          LowCardinality(String) DEFAULT '',
     tool_name                       LowCardinality(String),
     started_at                      DateTime64(3, 'UTC'),
     finished_at                     DateTime64(3, 'UTC'),
@@ -81,6 +83,7 @@ CREATE TABLE IF NOT EXISTS application_logs (
     received_at             DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
     level                   LowCardinality(String),
     service                 LowCardinality(String),
+    client                  LowCardinality(String) DEFAULT '',
     logger                  LowCardinality(String) DEFAULT '',
     trace_id                Nullable(UUID),
     span_id                 Nullable(String),
@@ -94,14 +97,20 @@ TTL toDateTime(ts) + INTERVAL 30 DAY;
 
 -- ─────────────────────────────────────────────────────────────────────
 -- Materialized views — pre-aggregated rollups for dashboards.
+--
+-- IMPORTANT: materialized views can NOT be ALTERed in-place when their
+-- column list changes. If this file ran already (existing deployment),
+-- DROP and recreate the MVs manually — see the migration snippet at the
+-- bottom of this file.
 -- ─────────────────────────────────────────────────────────────────────
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_inference_5m
 ENGINE = AggregatingMergeTree
 PARTITION BY toYYYYMM(bucket)
-ORDER BY (bucket, provider, model)
+ORDER BY (bucket, client, provider, model)
 AS SELECT
     toStartOfFiveMinute(started_at) AS bucket,
+    client,
     provider,
     model,
     quantileState(0.5)(latency_ms)   AS p50_latency_state,
@@ -117,14 +126,15 @@ AS SELECT
     countStateIf(status = 'cancelled') AS cancelled_count_state,
     sumState(toUInt64(tool_calls_count)) AS tool_calls_state
 FROM inference_logs
-GROUP BY bucket, provider, model;
+GROUP BY bucket, client, provider, model;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_tool_5m
 ENGINE = AggregatingMergeTree
 PARTITION BY toYYYYMM(bucket)
-ORDER BY (bucket, tool_name)
+ORDER BY (bucket, client, tool_name)
 AS SELECT
     toStartOfFiveMinute(started_at) AS bucket,
+    client,
     tool_name,
     countState()                     AS call_count_state,
     quantileState(0.5)(latency_ms)   AS p50_latency_state,
@@ -132,4 +142,14 @@ AS SELECT
     countStateIf(status = 'error')   AS error_count_state,
     sumState(toUInt64(result_size_bytes)) AS bytes_state
 FROM tool_executions
-GROUP BY bucket, tool_name;
+GROUP BY bucket, client, tool_name;
+
+-- ─────────────────────────────────────────────────────────────────────
+-- Migration for existing deployments (run manually after pulling this change):
+-- ALTER TABLE inference_logs ADD COLUMN IF NOT EXISTS client LowCardinality(String) DEFAULT '' AFTER service;
+-- ALTER TABLE tool_executions ADD COLUMN IF NOT EXISTS client LowCardinality(String) DEFAULT '' AFTER service;
+-- ALTER TABLE application_logs ADD COLUMN IF NOT EXISTS client LowCardinality(String) DEFAULT '' AFTER service;
+-- DROP TABLE mv_inference_5m;
+-- DROP TABLE mv_tool_5m;
+-- (Re-run the CREATE MATERIALIZED VIEW statements above.)
+-- ─────────────────────────────────────────────────────────────────────

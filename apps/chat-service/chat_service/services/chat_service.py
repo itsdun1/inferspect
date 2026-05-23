@@ -30,7 +30,7 @@ from chat_service.llm.agent import build_agent
 from chat_service.llm.langchain_adapter import provider_for, to_lc_messages
 from chat_service.llm.memory import load_window
 from chat_service.llm.prompts import SYSTEM_PROMPT
-from chat_service.llm.sdk_callback import SDKCallback
+from chatbot_sdk.integrations.langchain import SDKCallback
 from chat_service.llm.tools import DEFAULT_TOOLS
 from chat_service.repositories import conversation_repository, message_repository
 from chat_service.schemas import SendMessageResponse

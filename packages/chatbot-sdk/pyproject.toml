@@ -1,7 +1,25 @@
 [project]
-name = "chatbot-sdk"
-version = "0.1.0"
-description = "Lightweight SDK for capturing LLM inference, tool execution, and application logs."
+name = "inferspect-sdk"
+version = "0.2.0"
+description = "Lightweight Python SDK for capturing LLM inference, tool execution, and application logs with client-side PII redaction."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Aditya Kale", email = "aditya.kale@vahan.co"},
+]
+keywords = ["llm", "observability", "logging", "openai", "anthropic", "langchain", "telemetry", "pii"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Logging",
+]
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
@@ -10,7 +28,18 @@ dependencies = [
     "uuid7>=0.1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/itsdun1/inferspect"
+Repository = "https://github.com/itsdun1/inferspect"
+Issues = "https://github.com/itsdun1/inferspect/issues"
+
 [project.optional-dependencies]
+langchain  = ["langchain-core>=0.3"]
+openai     = ["openai>=1.40"]
+anthropic  = ["anthropic>=0.34"]
+google     = ["google-genai>=0.3"]
+llamaindex = ["llama-index-core>=0.11"]
+all        = ["langchain-core>=0.3", "openai>=1.40", "anthropic>=0.34", "google-genai>=0.3", "llama-index-core>=0.11"]
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

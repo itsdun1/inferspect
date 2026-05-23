@@ -1,0 +1,17 @@
+{
+  "name": "ollive-frontends",
+  "private": true,
+  "version": "0.1.0",
+  "description": "npm workspace root for the two Next.js apps (web-chat, web-insights) + shared TS types (web-shared). Python apps live under apps/* with their own uv workspace; this file is only for JS packages.",
+  "workspaces": [
+    "apps/web-chat",
+    "apps/web-insights",
+    "apps/web-shared"
+  ],
+  "scripts": {
+    "build:chat": "npm run build --workspace=web-chat",
+    "build:insights": "npm run build --workspace=web-insights",
+    "dev:chat": "npm run dev --workspace=web-chat",
+    "dev:insights": "npm run dev --workspace=web-insights"
+  }
+}

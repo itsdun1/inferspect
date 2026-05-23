@@ -8,9 +8,11 @@ from insights_api.repositories import clickhouse_repo as repo
 from insights_api.services.window import since_for
 
 
-async def tools(client: Any, *, window: str) -> dict[str, Any]:
+async def tools(
+    ch_client: Any, *, window: str, client: str | None = None
+) -> dict[str, Any]:
     since = since_for(window)
-    rows = await repo.tool_metrics(client, since=since)
+    rows = await repo.tool_metrics(ch_client, since=since, client=client)
 
     enriched: list[dict[str, Any]] = []
     for row in rows:

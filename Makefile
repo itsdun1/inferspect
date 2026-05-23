@@ -40,8 +40,16 @@ install: ## Install Python deps via uv (workspace)
 	uv sync
 
 .PHONY: web-install
-web-install: ## Install Next.js deps
-	cd apps/web && pnpm install
+web-install: ## Install Next.js workspace deps (web-chat + web-insights + web-shared)
+	npm install
+
+.PHONY: web-chat-dev
+web-chat-dev: ## Run web-chat dev server (Next.js, default port 3000)
+	npm run dev:chat
+
+.PHONY: web-insights-dev
+web-insights-dev: ## Run web-insights dev server (Next.js, default port 3000)
+	npm run dev:insights
 
 .PHONY: test
 test: ## Run Python test suite

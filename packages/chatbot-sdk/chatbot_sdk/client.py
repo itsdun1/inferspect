@@ -28,9 +28,11 @@ Typical usage::
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
 import inspect
 import json
+import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
@@ -50,6 +52,22 @@ from chatbot_sdk.transport import BatchedLogTransport
 PREVIEW_MAX = 500
 P = ParamSpec("P")
 R = TypeVar("R")
+
+# Per-request context set by ``InferenceLogger.context(...)`` and read by
+# integration ``instrument()`` helpers so request-scoped ids
+# (conversation_id, session_id, user_id) flow into auto-traced spans without
+# the caller threading them through each LLM call.
+# Default is None (sentinel for "no active context"); ``current_context()``
+# returns ``{}`` so callers always see a dict. We avoid a mutable default for
+# the ContextVar itself per ruff B039.
+_current_context: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "chatbot_sdk_current_context", default=None
+)
+
+
+def current_context() -> dict[str, Any]:
+    """Return the active per-request context dict (or empty dict)."""
+    return _current_context.get() or {}
 
 
 def _now() -> datetime:
@@ -83,8 +101,10 @@ class InferenceSpan:
         stream: bool,
         input_preview: str,
         metadata: dict[str, Any],
+        sdk: InferenceLogger | None = None,
     ) -> None:
         self.request_id = request_id
+        self._sdk = sdk
         self._provider = provider
         self._model = model
         self._service = service
@@ -174,6 +194,13 @@ class InferenceSpan:
         finished_at = _now()
         total = self._prompt_tokens + self._completion_tokens
         output_preview = _truncate("".join(self._output_chunks))
+        input_preview = self._input_preview
+        if self._sdk is not None and self._sdk._pii_redact:
+            from chatbot_sdk.pii import redact_text
+
+            recognizers = self._sdk._pii_recognizers
+            input_preview = redact_text(input_preview, recognizers)
+            output_preview = redact_text(output_preview, recognizers)
         finish = self._finish_reason or (
             FinishReason.TOOL_CALLS if self._tool_calls else
             FinishReason.CANCELLED if status == Status.CANCELLED else
@@ -204,7 +231,7 @@ class InferenceSpan:
             tool_calls_summary=self._tool_calls,
             error_code=type(error).__name__ if error else None,
             error_message=str(error)[:500] if error else None,
-            input_preview=self._input_preview,
+            input_preview=input_preview,
             output_preview=output_preview,
             metadata=self._metadata,
         )
@@ -224,9 +251,11 @@ class ToolSpan:
         user_id: UUID | None,
         args_preview: str,
         metadata: dict[str, Any],
+        sdk: InferenceLogger | None = None,
     ) -> None:
         self.request_id = request_id
         self.tool_call_id = tool_call_id
+        self._sdk = sdk
         self._tool_name = tool_name
         self._service = service
         self._parent = parent_inference_request_id
@@ -249,6 +278,14 @@ class ToolSpan:
 
     def _finalize(self, status: Status, error: BaseException | None) -> ToolExecutionLog:
         finished_at = _now()
+        args_preview = self._args_preview
+        result_preview = self._result_preview
+        if self._sdk is not None and self._sdk._pii_redact:
+            from chatbot_sdk.pii import redact_text
+
+            recognizers = self._sdk._pii_recognizers
+            args_preview = redact_text(args_preview, recognizers)
+            result_preview = redact_text(result_preview, recognizers)
         return ToolExecutionLog(
             schema_version=SCHEMA_VERSION,
             service=self._service,
@@ -265,8 +302,8 @@ class ToolSpan:
             status=status,
             error_code=type(error).__name__ if error else None,
             error_message=str(error)[:500] if error else None,
-            args_preview=self._args_preview,
-            result_preview=self._result_preview,
+            args_preview=args_preview,
+            result_preview=result_preview,
             result_size_bytes=self._result_size_bytes,
             metadata=self._metadata,
         )
@@ -281,12 +318,16 @@ class InferenceLogger:
         *,
         ingestion_url: str,
         service: str,
-        sdk_version: str = "0.1.0",
+        sdk_version: str = "0.2.0",
         api_key: str | None = None,
+        pii_redact: bool = True,
+        pii_recognizers: list[str] | None = None,
         transport: BatchedLogTransport | None = None,
     ) -> None:
         self.service = service
         self.sdk_version = sdk_version
+        self._pii_redact = pii_redact
+        self._pii_recognizers = pii_recognizers
         self.transport = transport or BatchedLogTransport(
             ingestion_url=ingestion_url,
             service=service,
@@ -294,11 +335,55 @@ class InferenceLogger:
             api_key=api_key,
         )
 
+    @classmethod
+    def from_env(cls) -> InferenceLogger:
+        """Build a logger from ``CHATBOT_SDK_URL`` / ``CHATBOT_SDK_KEY`` /
+        ``CHATBOT_SDK_SERVICE`` (service defaults to ``"app"``).
+
+        Raises ``ValueError`` if ``CHATBOT_SDK_URL`` isn't set."""
+        url = os.environ.get("CHATBOT_SDK_URL")
+        if not url:
+            raise ValueError(
+                "CHATBOT_SDK_URL is not set; cannot build InferenceLogger.from_env()"
+            )
+        api_key = os.environ.get("CHATBOT_SDK_KEY")
+        service = os.environ.get("CHATBOT_SDK_SERVICE", "app")
+        return cls(ingestion_url=url, service=service, api_key=api_key)
+
     async def start(self) -> None:
         await self.transport.start()
 
     async def close(self) -> None:
         await self.transport.close()
+
+    async def __aenter__(self) -> InferenceLogger:
+        await self.start()
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.close()
+
+    @contextlib.asynccontextmanager
+    async def context(
+        self,
+        *,
+        conversation_id: UUID | None = None,
+        session_id: UUID | None = None,
+        user_id: UUID | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Set a per-request ContextVar that integration ``instrument()`` helpers
+        read so they can stamp request-scoped ids onto spans without the caller
+        threading them through every LLM call."""
+        ctx: dict[str, Any] = {
+            "conversation_id": conversation_id,
+            "session_id": session_id,
+            "user_id": user_id,
+        }
+        token = _current_context.set(ctx)
+        try:
+            yield ctx
+        finally:
+            _current_context.reset(token)
 
     # ─── Inference span ──────────────────────────────────────────
     @contextlib.asynccontextmanager
@@ -325,6 +410,7 @@ class InferenceLogger:
             stream=stream,
             input_preview=input_preview,
             metadata=metadata or {},
+            sdk=self,
         )
         status = Status.OK
         error: BaseException | None = None
@@ -372,6 +458,7 @@ class InferenceLogger:
             user_id=user_id,
             args_preview=args_preview,
             metadata=metadata or {},
+            sdk=self,
         )
         status = Status.OK
         error: BaseException | None = None

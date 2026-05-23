@@ -14,7 +14,6 @@ from chat_service.auth import auth_router, bootstrap_admin
 from chat_service.cancellation import StreamRegistry
 from chat_service.config import settings
 from chat_service.controllers import (
-    admin_controller,
     chat_controller,
     conversation_controller,
     health_controller,
@@ -91,7 +90,6 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(conversation_controller.router)
     app.include_router(chat_controller.router)
-    app.include_router(admin_controller.router)
     return app
 
 

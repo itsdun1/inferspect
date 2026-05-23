@@ -56,6 +56,10 @@ class _BaseLog(BaseModel):
 class InferenceLog(_BaseLog):
     log_type: Literal[LogType.INFERENCE] = LogType.INFERENCE
 
+    # Server-set tenant tag. SDK leaves this as "" — ingestion resolves the
+    # API key into a client_name and stamps the event before publishing.
+    client: str = ""
+
     request_id: UUID
     conversation_id: UUID | None = None
     session_id: UUID | None = None
@@ -92,6 +96,10 @@ class InferenceLog(_BaseLog):
 class ToolExecutionLog(_BaseLog):
     log_type: Literal[LogType.TOOL_EXECUTION] = LogType.TOOL_EXECUTION
 
+    # Server-set tenant tag. SDK leaves this as "" — ingestion resolves the
+    # API key into a client_name and stamps the event before publishing.
+    client: str = ""
+
     request_id: UUID
     tool_call_id: UUID
     parent_inference_request_id: UUID | None = None
@@ -118,6 +126,10 @@ class ToolExecutionLog(_BaseLog):
 
 class ApplicationLog(_BaseLog):
     log_type: Literal[LogType.APPLICATION] = LogType.APPLICATION
+
+    # Server-set tenant tag. SDK leaves this as "" — ingestion resolves the
+    # API key into a client_name and stamps the event before publishing.
+    client: str = ""
 
     ts: datetime
     level: str

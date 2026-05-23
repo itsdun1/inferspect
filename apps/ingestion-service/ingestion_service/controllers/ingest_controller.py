@@ -27,7 +27,7 @@ async def ingest(
     envelope: LogEnvelope,
     response: Response,
     request: Request,
-    _auth: None = Depends(require_api_key),
+    client_name: str = Depends(require_api_key),
     ingest_service: IngestService = Depends(get_ingest_service),
     x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
 ) -> IngestResponse:
@@ -43,6 +43,7 @@ async def ingest(
 
     try:
         result = await ingest_service.ingest_batch(
+            client=client_name,
             service=envelope.service,
             sdk_version=envelope.sdk_version,
             events=[e.model_dump(mode="json") for e in envelope.events],

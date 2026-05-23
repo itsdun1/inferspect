@@ -143,22 +143,48 @@ services:
       ingestion-service:
         condition: service_started
 
-  web:
+  # End-user chat UI. Talks to chat-service only. `chat_session` cookie is
+  # scoped to chat.${DOMAIN} (Caddy fronts both this and chat-service under
+  # the same subdomain). Locally exposed on host port 3001.
+  web-chat:
     build:
       context: ..
-      dockerfile: apps/web/Dockerfile
+      dockerfile: apps/web-chat/Dockerfile
       args:
-        # Chat base URL ends at /api/chat because the page calls /auth/login,
-        # /conversations, /chat (no leading /chat/ in code).
-        NEXT_PUBLIC_API_URL: https://${DOMAIN}/api/chat
-        # Insights base ends at /api because the page calls /insights/summary
-        # etc. with the /insights/ prefix in code. Caddy's /api/insights/*
-        # matcher still routes correctly.
-        NEXT_PUBLIC_INSIGHTS_URL: https://${DOMAIN}/api
-    image: ollive/web:dev
+        # Bundled into the JS at build time. The Next.js app fetches relative
+        # paths (e.g. /auth/login) against this base; Caddy rewrites
+        # /api/chat/* → chat-service:8000.
+        NEXT_PUBLIC_CHAT_API_URL: https://chat.${DOMAIN}/api/chat
+    image: ollive/web-chat:dev
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/login || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     depends_on:
       - chat-service
+
+  # Operator console. Talks to insights-api only. `console_session` cookie is
+  # scoped to insights.${DOMAIN}. Locally exposed on host port 3002.
+  web-insights:
+    build:
+      context: ..
+      dockerfile: apps/web-insights/Dockerfile
+      args:
+        NEXT_PUBLIC_INSIGHTS_API_URL: https://insights.${DOMAIN}/api/insights
+    image: ollive/web-insights:dev
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3002:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/login || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
       - insights-api
 
   caddy:
@@ -174,7 +200,8 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - web
+      - web-chat
+      - web-insights
       - chat-service
       - insights-api
       - ingestion-service

@@ -42,6 +42,7 @@ class IngestService:
     async def ingest_batch(
         self,
         *,
+        client: str,
         service: str,
         sdk_version: str,
         events: list[dict[str, Any]],
@@ -73,6 +74,9 @@ class IngestService:
             event_dict.setdefault("metadata", {})
             event_dict["received_at"] = received_at
             event_dict["ingest_service"] = service
+            # Stamp the resolved tenant on every event before PII runs. The
+            # PII redactor only walks known text fields, so this is safe.
+            event_dict["client"] = client
 
             # PII redaction (after validation, before publish — so we never
             # ship raw PII downstream)

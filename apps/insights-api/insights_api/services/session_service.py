@@ -7,9 +7,15 @@ from typing import Any
 from insights_api.repositories import clickhouse_repo as repo
 
 
-async def session_timeline(client: Any, *, session_id: str) -> dict[str, Any]:
-    inference_events = await repo.session_inference_events(client, session_id=session_id)
-    tool_events = await repo.session_tool_events(client, session_id=session_id)
+async def session_timeline(
+    ch_client: Any, *, session_id: str, client: str | None = None
+) -> dict[str, Any]:
+    inference_events = await repo.session_inference_events(
+        ch_client, session_id=session_id, client=client
+    )
+    tool_events = await repo.session_tool_events(
+        ch_client, session_id=session_id, client=client
+    )
 
     timeline: list[dict[str, Any]] = []
     for ev in inference_events:

@@ -29,6 +29,7 @@ APPLICATION_COLUMNS: list[str] = [
     "span_id",
     "message",
     "attributes",
+    "client",
 ]
 
 
@@ -72,4 +73,7 @@ def _coerce(event: dict[str, Any], col: str) -> Any:
         if isinstance(value, str):
             return value
         return json.dumps(value, default=str)
+    # Tenant tag — non-Nullable in CH, default empty string when absent.
+    if col == "client" and value is None:
+        return ""
     return value

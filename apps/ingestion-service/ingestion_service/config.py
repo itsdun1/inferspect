@@ -27,6 +27,9 @@ class Settings(BaseSettings):
 
     # Auth
     sdk_api_key: str | None = None
+    # JSON object mapping SDK keys to client/tenant names, e.g.
+    # SDK_API_KEYS_JSON='{"osk_dev_changeme": "chat-service"}'
+    sdk_api_keys_json: str = "{}"
 
     # Limits
     max_events_per_batch: int = 500
