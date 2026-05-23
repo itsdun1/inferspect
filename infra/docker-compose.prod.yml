@@ -65,6 +65,9 @@ services:
       VALKEY_URL: redis://valkey:6379/0
       PII_ENABLED: "${PII_ENABLED:-false}"
       SDK_API_KEY: "${SDK_API_KEY:-}"
+      # Env-driven key→client tenant map (Phase C). Without this, every
+      # event lands in ClickHouse with client="unknown".
+      SDK_API_KEYS_JSON: "${SDK_API_KEYS_JSON:-{}}"
     command: ["uvicorn", "ingestion_service.main:app", "--host", "0.0.0.0", "--port", "8001"]
     depends_on:
       valkey:
