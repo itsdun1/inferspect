@@ -30,9 +30,8 @@ from chat_service.llm.agent import build_agent
 from chat_service.llm.langchain_adapter import provider_for, to_lc_messages
 from chat_service.llm.memory import load_window
 from chat_service.llm.prompts import SYSTEM_PROMPT
-from chatbot_sdk.integrations.langchain import SDKCallback
-from chat_service.llm.raw_providers import (
-    RawProviders,
+from chat_service.llm.sdk_integrations import (
+    SDKIntegrations,
     is_raw_model,
     provider_for_raw,
 )
@@ -50,13 +49,13 @@ class ChatService:
         *,
         logger: "InferenceLogger | None" = None,
         registry: StreamRegistry | None = None,
-        raw_providers: RawProviders | None = None,
+        sdk_integrations: SDKIntegrations | None = None,
     ) -> None:
         self._logger = logger
         self._registry = registry or StreamRegistry()
-        # Pre-built at boot in main.lifespan. None only in tests or when
-        # the SDK logger wasn't available — the raw-* models then 503.
-        self._raw = raw_providers or RawProviders(logger=logger)
+        # Pre-built at boot in main.lifespan. Single hub for ALL chat-service
+        # ↔ SDK integration — raw providers AND LangChain callback builder.
+        self._sdk = sdk_integrations or SDKIntegrations(logger=logger)
 
     @property
     def registry(self) -> StreamRegistry:
@@ -87,7 +86,7 @@ class ChatService:
             # (instrumented once at boot in main.lifespan). No LangChain,
             # no tools, no agent loop. logger.context(...) inside chat()
             # stamps conversation_id/user_id on the span.
-            raw = await self._raw.chat(
+            raw = await self._sdk.chat(
                 model=chosen_model,
                 system_prompt=SYSTEM_PROMPT,
                 history=history,
@@ -99,7 +98,9 @@ class ChatService:
         else:
             lc_messages = [SystemMessage(content=SYSTEM_PROMPT), *to_lc_messages(history)]
             agent = build_agent(chosen_model, tools=DEFAULT_TOOLS)
-            callback = self._make_callback(convo.id, user.id, chosen_model)
+            callback = self._sdk.build_langchain_callback(
+                conversation_id=convo.id, user_id=user.id, model_hint=chosen_model,
+            )
 
             result: dict[str, Any] = await agent.ainvoke(
                 {"messages": lc_messages},
@@ -164,17 +165,6 @@ class ChatService:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="conversation cancelled")
         return convo
 
-    def _make_callback(self, conv_id: uuid.UUID, user_id: uuid.UUID, model: str) -> SDKCallback | None:
-        if self._logger is None:
-            return None
-        return SDKCallback(
-            sdk=self._logger,
-            conversation_id=conv_id,
-            user_id=user_id,
-            model_hint=model,
-        )
-
-
 # ─── Streaming ───────────────────────────────────────────────────
 async def stream_send(
     chat_svc: ChatService,
@@ -225,7 +215,7 @@ async def stream_send(
                 # factory. instrument() ran once at boot — the client method
                 # is already monkey-patched and emits inference logs as it
                 # streams. No LangChain agent, no tools, no callback.
-                async for text in chat_svc._raw.stream_chat(
+                async for text in chat_svc._sdk.stream_chat(
                     model=chosen_model,
                     system_prompt=SYSTEM_PROMPT,
                     history=history,
@@ -238,7 +228,9 @@ async def stream_send(
             else:
                 lc_messages = [SystemMessage(content=SYSTEM_PROMPT), *to_lc_messages(history)]
                 agent = build_agent(chosen_model, tools=DEFAULT_TOOLS)
-                callback = chat_svc._make_callback(convo.id, user.id, chosen_model)
+                callback = chat_svc._sdk.build_langchain_callback(
+                    conversation_id=convo.id, user_id=user.id, model_hint=chosen_model,
+                )
 
                 async for event in agent.astream_events(
                     {"messages": lc_messages},

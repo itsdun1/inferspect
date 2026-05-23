@@ -1,16 +1,23 @@
-"""Direct OpenAI / Anthropic chat handlers — no LangChain in the path.
+"""All chat-service ↔ inferspect-sdk integration in one place.
 
-Owns the SDK-instrumented provider clients via a ``RawProviders`` factory
-that's constructed once at startup (chat_service.main:lifespan). Every
-``client.chat.completions.create`` / ``client.messages.create`` call goes
-through the SDK's monkey-patch installed by ``instrument()`` at boot.
+``SDKIntegrations`` is a single factory constructed once at startup
+(chat_service.main:lifespan). It owns:
 
-Why a factory class (vs the previous module-level globals): explicit
-lifecycle, no module-state mutation, testable in isolation, multiple
-instances possible (e.g. two loggers shipping to different ingestion
-endpoints). Same idempotency story since ``wrap_method`` on the SDK side
-tags wrapped methods with a sentinel — instrumenting the same client
-twice is still a no-op.
+- The SDK-instrumented raw provider clients (AsyncOpenAI, AsyncAnthropic).
+  ``instrument()`` runs once at construction; every subsequent call to
+  ``client.chat.completions.create`` / ``client.messages.create`` is
+  auto-traced via the SDK monkey-patch.
+
+- A factory method ``build_langchain_callback(...)`` that produces a fresh
+  ``SDKCallback`` per LangChain invocation. The callback is per-request
+  because it carries conversation_id/user_id, but it always closes over
+  the same shared ``InferenceLogger``.
+
+Why one factory for both: chat-service has two distinct integration
+patterns with the SDK — raw clients (monkey-patch lifecycle) and
+LangChain (callback-per-invocation lifecycle). Both fundamentally route
+events to the same singleton logger, so we co-locate them. Anyone
+asking "how is the SDK wired up here" reads exactly one file.
 
 Model dispatch (caller-side):
     "raw-openai/gpt-4o"                       → AsyncOpenAI.chat.completions.create
@@ -32,6 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from openai import AsyncOpenAI
 
     from chatbot_sdk import InferenceLogger
+    from chatbot_sdk.integrations.langchain import SDKCallback
 
 log = logging.getLogger(__name__)
 
@@ -48,13 +56,24 @@ class RawResponse:
 # ─── Factory ─────────────────────────────────────────────────────────
 
 
-class RawProviders:
-    """Owns the SDK-instrumented OpenAI + Anthropic clients for the process.
+class SDKIntegrations:
+    """Single integration surface for chat-service ↔ inferspect-sdk.
 
     Construct ONCE at boot inside chat_service.main:lifespan. Pass into
-    ``ChatService(raw_providers=...)``. If a provider library is missing or
-    the API key is unset, the corresponding client stays None and raw calls
-    raise a clear error.
+    ``ChatService(sdk_integrations=...)``.
+
+    Holds (long-lived, instrumented once at boot):
+      - ``self.openai``     — AsyncOpenAI client patched by SDK instrument()
+      - ``self.anthropic``  — AsyncAnthropic client patched by SDK instrument()
+
+    Exposes (per-request builders):
+      - ``build_langchain_callback(conv_id, user_id, model)`` — returns a
+        fresh SDKCallback for one ``agent.ainvoke(config={"callbacks": [...]})``.
+
+    If a provider library is missing or the API key is unset, the
+    corresponding client stays None and raw-* calls raise a clear error.
+    LangChain callback returns None when no logger — agent just runs
+    without observability instead of failing.
     """
 
     def __init__(self, *, logger: "InferenceLogger | None") -> None:
@@ -216,6 +235,37 @@ class RawProviders:
             return
 
         raise ValueError(f"unknown raw model: {model!r}")
+
+    # ─── LangChain integration (per-request callback) ───────────────
+    def build_langchain_callback(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        user_id: uuid.UUID,
+        model_hint: str,
+    ) -> "SDKCallback | None":
+        """Build a fresh SDKCallback for one ``agent.ainvoke(config={"callbacks": [...]})``.
+
+        The callback is per-request because it carries per-request ids
+        (conversation_id, user_id). It closes over the same shared
+        ``InferenceLogger`` we constructed at boot, so all events from this
+        callback feed the same batched transport as the raw paths.
+
+        Returns ``None`` if no SDK logger is wired up — the agent then runs
+        with an empty callbacks list (no observability, but the chat still
+        works)."""
+        if self._logger is None:
+            return None
+        # Lazy import so the SDK's langchain integration module doesn't load
+        # in environments where langchain isn't installed (test-only paths).
+        from chatbot_sdk.integrations.langchain import SDKCallback
+
+        return SDKCallback(
+            sdk=self._logger,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            model_hint=model_hint,
+        )
 
     # ─── Internals ───────────────────────────────────────────────────
     def _ctx(
