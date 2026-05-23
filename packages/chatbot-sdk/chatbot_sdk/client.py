@@ -191,6 +191,13 @@ class InferenceSpan:
 
     # ─── Internals used by InferenceLogger ───────────────────────
     def _finalize(self, status: Status, error: BaseException | None) -> InferenceLog:
+        # Measure how long this _finalize itself takes (PII redaction +
+        # Pydantic construction). Integration wrappers also record pre-call
+        # SDK time via set_metadata("sdk_pre_call_ms", ...). We sum them to
+        # produce metadata["sdk_overhead_ms"] — total time the SDK added
+        # outside the actual provider API call.
+        t_finalize_start = time.perf_counter()
+
         finished_at = _now()
         total = self._prompt_tokens + self._completion_tokens
         output_preview = _truncate("".join(self._output_chunks))
@@ -207,6 +214,15 @@ class InferenceSpan:
             FinishReason.ERROR if status == Status.ERROR else
             FinishReason.STOP
         )
+
+        # Stamp SDK timing into metadata BEFORE we build the Pydantic model
+        # so it lands in the wire payload. Integration wrappers may have
+        # already stamped sdk_pre_call_ms and api_call_ms via set_metadata.
+        finalize_ms = (time.perf_counter() - t_finalize_start) * 1000
+        pre_call_ms = float(self._metadata.get("sdk_pre_call_ms", 0) or 0)
+        self._metadata["sdk_finalize_ms"] = round(finalize_ms, 3)
+        self._metadata["sdk_overhead_ms"] = round(pre_call_ms + finalize_ms, 3)
+
         return InferenceLog(
             schema_version=SCHEMA_VERSION,
             service=self._service,

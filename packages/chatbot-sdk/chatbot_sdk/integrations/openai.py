@@ -24,6 +24,7 @@ _require_extra("openai", "openai")
 
 import inspect
 import json
+import time
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
@@ -71,6 +72,11 @@ def _build_async_wrapper(original: Any, logger: InferenceLogger) -> Any:
     stream=True path (return an async iterator that observes each chunk)."""
 
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        # Measure how much time the SDK adds vs the actual API call. Pre-call
+        # time = wrapper setup + span construction (we stamp it as metadata so
+        # _finalize can sum with its own time). api_call_ms = pure HTTP+server.
+        t_start = time.perf_counter()
+
         model = kwargs.get("model", "unknown")
         stream = bool(kwargs.get("stream", False))
         input_preview = _last_user_text(kwargs.get("messages") or [])
@@ -83,20 +89,32 @@ def _build_async_wrapper(original: Any, logger: InferenceLogger) -> Any:
             **current_ctx_kwargs(),
         )
         span = await cm.__aenter__()
+        t_pre_call = time.perf_counter()
+
         try:
             result = await original(*args, **kwargs)
         except BaseException as exc:
             await cm.__aexit__(type(exc), exc, exc.__traceback__)
             raise
 
-        if stream:
-            # Wrap the returned async iterator so we close the span only after
-            # the consumer has fully drained the stream.
-            return _stream_proxy(result, span, cm)
+        t_post_call = time.perf_counter()
 
-        # Non-stream path — capture once, close immediately.
+        if stream:
+            # Stream path — close the span when the customer drains the iterator.
+            # api_call_ms is updated again inside _stream_proxy at drain time.
+            span.set_metadata(
+                sdk_pre_call_ms=round((t_pre_call - t_start) * 1000, 3),
+                api_call_ms=round((t_post_call - t_pre_call) * 1000, 3),
+            )
+            return _stream_proxy(result, span, cm, t_start, t_pre_call)
+
+        # Non-stream path — record timing + capture once + close.
         try:
             span.set_response(_normalize_response(result))
+            span.set_metadata(
+                sdk_pre_call_ms=round((t_pre_call - t_start) * 1000, 3),
+                api_call_ms=round((t_post_call - t_pre_call) * 1000, 3),
+            )
         finally:
             await cm.__aexit__(None, None, None)
         return result
@@ -104,8 +122,14 @@ def _build_async_wrapper(original: Any, logger: InferenceLogger) -> Any:
     return wrapper
 
 
-async def _stream_proxy(stream: Any, span: Any, cm: Any) -> AsyncIterator[Any]:
-    """Yield chunks while observing each one onto the span; close on drain."""
+async def _stream_proxy(
+    stream: Any, span: Any, cm: Any, t_start: float, t_pre_call: float
+) -> AsyncIterator[Any]:
+    """Yield chunks while observing each one onto the span; close on drain.
+
+    Updates ``api_call_ms`` on drain so it reflects the FULL stream duration
+    (not just time to first chunk) and ``sdk_pre_call_ms`` stays as the
+    pre-API setup cost."""
     try:
         async for chunk in stream:
             try:
@@ -117,6 +141,12 @@ async def _stream_proxy(stream: Any, span: Any, cm: Any) -> AsyncIterator[Any]:
         await cm.__aexit__(type(exc), exc, exc.__traceback__)
         raise
     else:
+        # Stream fully drained — update api_call_ms to cover the whole stream.
+        t_end = time.perf_counter()
+        span.set_metadata(
+            sdk_pre_call_ms=round((t_pre_call - t_start) * 1000, 3),
+            api_call_ms=round((t_end - t_pre_call) * 1000, 3),
+        )
         await cm.__aexit__(None, None, None)
 
 

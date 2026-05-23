@@ -97,6 +97,29 @@ async def top_conversations(
     return {"window": window, "metric": metric, "limit": limit, "conversations": rows}
 
 
+async def sdk_overhead(
+    ch_client: Any, *, window: str, client: str | None = None
+) -> dict[str, Any]:
+    """Quantiles over metadata.sdk_overhead_ms — proves SDK adds ~0 cost.
+
+    Pulled directly from inference_logs (not an MV) because metadata is a
+    JSON column and we only need ~minutes of data to compute quantiles. Falls
+    back to zeros if no rows have the field populated yet (older SDK
+    versions don't ship it)."""
+    since = since_for(window)
+    row = await repo.sdk_overhead_quantiles(ch_client, since=since, client=client)
+    return {
+        "window": window,
+        "sample_size": int(row.get("sample_size") or 0),
+        "p50_ms": float(row.get("p50_ms") or 0.0),
+        "p95_ms": float(row.get("p95_ms") or 0.0),
+        "p99_ms": float(row.get("p99_ms") or 0.0),
+        "max_ms": float(row.get("max_ms") or 0.0),
+        "p50_api_ms": float(row.get("p50_api_ms") or 0.0),
+        "p95_api_ms": float(row.get("p95_api_ms") or 0.0),
+    }
+
+
 async def summary(ch_client: Any, *, window: str, client: str | None = None) -> dict[str, Any]:
     """Return the rollup the UI's health badge consumes.
 

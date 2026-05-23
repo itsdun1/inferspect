@@ -46,6 +46,17 @@ const WINDOWS = [
 // so the operator sees aggregate across every customer.
 const ALL_CLIENTS = "__all__";
 
+interface SdkOverheadStats {
+  window: string;
+  sample_size: number;
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+  max_ms: number;
+  p50_api_ms: number;
+  p95_api_ms: number;
+}
+
 function withClient(path: string, client: string): string {
   if (client === ALL_CLIENTS) return path;
   const sep = path.includes("?") ? "&" : "?";
@@ -67,6 +78,7 @@ export default function InsightsPage() {
   const [tools, setTools] = useState<FetchState<ToolStat[]>>(emptyState());
   const [drillId, setDrillId] = useState<string | null>(null);
   const [drillData, setDrillData] = useState<FetchState<SessionTimeline>>(emptyState());
+  const [sdkOverhead, setSdkOverhead] = useState<FetchState<SdkOverheadStats>>(emptyState());
 
   // Confirm we have a live operator session; the proxy gated us in on cookie
   // presence alone, this is the JWT-verified check.
@@ -131,6 +143,11 @@ export default function InsightsPage() {
       );
       return r.tools ?? [];
     }, setTools);
+    void load(async () => {
+      return await insightsApi.get<SdkOverheadStats>(
+        withClient(`/insights/sdk-overhead?window=${windowSel}`, clientSel),
+      );
+    }, setSdkOverhead);
   }, [windowSel, clientSel]);
 
   // Drill-down fetch when user clicks a conversation row.
@@ -217,6 +234,8 @@ export default function InsightsPage() {
       </header>
 
       <main className="px-6 py-6 space-y-6">
+        <SdkOverheadTile state={sdkOverhead} windowLabel={windowLabel} />
+
         <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           <ChartCard
             title="Latency (p50 / p95 / p99)"
@@ -582,4 +601,92 @@ function Td({
   className?: string;
 }) {
   return <td className={`px-4 py-2 ${className ?? ""}`}>{children}</td>;
+}
+
+function SdkOverheadTile({
+  state,
+  windowLabel,
+}: {
+  state: FetchState<SdkOverheadStats>;
+  windowLabel: string;
+}) {
+  if (state.loading) {
+    return (
+      <section className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700">
+        Measuring SDK overhead…
+      </section>
+    );
+  }
+  const data = state.data;
+  if (!data || data.sample_size === 0) {
+    return (
+      <section className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+        <span className="font-medium">SDK overhead</span> · no measurements yet
+        in <span className="font-mono">{windowLabel.toLowerCase()}</span> (send
+        a chat through any model to populate)
+      </section>
+    );
+  }
+  const pct = data.p50_api_ms > 0
+    ? ((data.p50_ms / data.p50_api_ms) * 100).toFixed(2)
+    : "—";
+  return (
+    <section className="rounded-lg border border-emerald-200 bg-gradient-to-r from-emerald-50 to-white p-4">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-semibold text-emerald-900">
+            SDK overhead
+            <span className="ml-2 text-xs font-normal text-emerald-700">
+              ({windowLabel} · {data.sample_size} samples)
+            </span>
+          </h2>
+          <p className="text-xs text-emerald-700 mt-1">
+            Time the SDK adds on top of the provider HTTP call. Captured by the
+            SDK itself via <span className="font-mono">perf_counter()</span>
+            {' '}around the wrapped call + inside <span className="font-mono">_finalize</span>.
+          </p>
+        </div>
+        <div className="flex gap-6 text-right">
+          <Stat label="p50" value={data.p50_ms} unit="ms" tone="good" />
+          <Stat label="p95" value={data.p95_ms} unit="ms" tone="good" />
+          <Stat label="p99" value={data.p99_ms} unit="ms" tone="good" />
+          <Stat label="max" value={data.max_ms} unit="ms" tone="good" />
+          <div className="border-l border-emerald-200 pl-6">
+            <Stat label="API p50" value={data.p50_api_ms} unit="ms" tone="muted" />
+          </div>
+          <div>
+            <Stat
+              label="overhead %"
+              value={pct === "—" ? 0 : Number(pct)}
+              unit="%"
+              tone="good"
+            />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  unit,
+  tone,
+}: {
+  label: string;
+  value: number;
+  unit: string;
+  tone: "good" | "muted";
+}) {
+  const color = tone === "good" ? "text-emerald-900" : "text-gray-700";
+  return (
+    <div className="text-right">
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className={`text-lg font-semibold tabular-nums ${color}`}>
+        {value.toFixed(value < 10 ? 2 : 1)}
+        <span className="ml-1 text-xs font-normal text-gray-500">{unit}</span>
+      </div>
+    </div>
+  );
 }

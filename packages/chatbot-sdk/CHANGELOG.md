@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.2 — 2026-05-23
+
+### Added
+- Self-measured SDK overhead metrics. Every inference event now ships with
+  `metadata.sdk_overhead_ms` (pre-call setup + finalize work) and
+  `metadata.api_call_ms` (the actual provider HTTP call). Lets customers
+  prove the SDK adds ~0 latency vs the raw provider call.
+- Measured via `time.perf_counter()` boundaries in OpenAI and Anthropic
+  integration wrappers, plus a perf boundary inside `InferenceSpan._finalize`
+  that covers PII redaction + Pydantic model construction.
+
+### Behaviour
+- No wire-format change. The new fields live inside the existing
+  `metadata` JSON column, so customers upgrading to 0.2.2 see the metrics
+  in their backend immediately with no server-side coordination.
+
 ## 0.2.1 — 2026-05-23
 
 ### Fixed

@@ -15,6 +15,7 @@ from chatbot_sdk._require import _require_extra
 _require_extra("anthropic", "anthropic")
 
 import inspect
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -52,6 +53,8 @@ def _build_sync_stub(original: Any) -> Any:
 
 def _build_async_wrapper(original: Any, logger: InferenceLogger) -> Any:
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        t_start = time.perf_counter()
+
         model = kwargs.get("model", "unknown")
         stream = bool(kwargs.get("stream", False))
         input_preview = _last_user_text(kwargs.get("messages") or [])
@@ -64,14 +67,22 @@ def _build_async_wrapper(original: Any, logger: InferenceLogger) -> Any:
             **current_ctx_kwargs(),
         )
         span = await cm.__aenter__()
+        t_pre_call = time.perf_counter()
+
         try:
             result = await original(*args, **kwargs)
         except BaseException as exc:
             await cm.__aexit__(type(exc), exc, exc.__traceback__)
             raise
 
+        t_post_call = time.perf_counter()
+
         try:
             span.set_response(_normalize_response(result))
+            span.set_metadata(
+                sdk_pre_call_ms=round((t_pre_call - t_start) * 1000, 3),
+                api_call_ms=round((t_post_call - t_pre_call) * 1000, 3),
+            )
         finally:
             await cm.__aexit__(None, None, None)
         return result

@@ -295,6 +295,39 @@ async def session_tool_events(
     return await _named_results(ch_client, sql, params)
 
 
+# ─── /insights/sdk-overhead ───────────────────────────────────────
+async def sdk_overhead_quantiles(
+    ch_client: _AsyncCHClient,
+    *,
+    since: datetime,
+    client: str | None = None,
+) -> dict[str, Any]:
+    """Quantiles over metadata.sdk_overhead_ms and metadata.api_call_ms.
+
+    Reads from raw inference_logs (not an MV) — metadata is a JSON column,
+    can't be materialized. Only counts rows where the field is present
+    (older SDK versions don't emit it)."""
+    sql = f"""
+        SELECT
+            count() AS sample_size,
+            quantile(0.5)(toFloat64OrZero(JSONExtractString(metadata, 'sdk_overhead_ms')))  AS p50_ms,
+            quantile(0.95)(toFloat64OrZero(JSONExtractString(metadata, 'sdk_overhead_ms'))) AS p95_ms,
+            quantile(0.99)(toFloat64OrZero(JSONExtractString(metadata, 'sdk_overhead_ms'))) AS p99_ms,
+            max(toFloat64OrZero(JSONExtractString(metadata, 'sdk_overhead_ms')))            AS max_ms,
+            quantile(0.5)(toFloat64OrZero(JSONExtractString(metadata, 'api_call_ms')))      AS p50_api_ms,
+            quantile(0.95)(toFloat64OrZero(JSONExtractString(metadata, 'api_call_ms')))     AS p95_api_ms
+        FROM inference_logs
+        WHERE received_at >= {{since:DateTime64(3)}}
+          AND JSONHas(metadata, 'sdk_overhead_ms')
+          {_client_filter(client)}
+    """
+    params: dict[str, Any] = {"since": since}
+    if client is not None:
+        params["client"] = client
+    rows = await _named_results(ch_client, sql, params)
+    return rows[0] if rows else {}
+
+
 # ─── /insights/summary ────────────────────────────────────────────
 async def summary_rollup(
     ch_client: _AsyncCHClient,

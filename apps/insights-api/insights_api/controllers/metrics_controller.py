@@ -103,3 +103,17 @@ async def summary(
         return await metrics_service.summary(ch_client, window=window, client=client)
     except ValueError as exc:
         raise _bad_request(exc) from exc
+
+
+@router.get("/sdk-overhead")
+async def sdk_overhead(
+    window: str = Query(default="1h"),
+    client: str | None = Query(default=None),
+    ch_client: Any = Depends(get_ch_client),
+) -> dict[str, Any]:
+    """SDK self-measured overhead percentiles — sdk_overhead_ms (pre-call
+    setup + finalize work) and api_call_ms (the actual provider HTTP)."""
+    try:
+        return await metrics_service.sdk_overhead(ch_client, window=window, client=client)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
