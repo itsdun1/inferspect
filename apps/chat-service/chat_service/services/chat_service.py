@@ -32,10 +32,9 @@ from chat_service.llm.memory import load_window
 from chat_service.llm.prompts import SYSTEM_PROMPT
 from chatbot_sdk.integrations.langchain import SDKCallback
 from chat_service.llm.raw_providers import (
-    chat_raw,
+    RawProviders,
     is_raw_model,
     provider_for_raw,
-    stream_chat_raw,
 )
 from chat_service.llm.tools import DEFAULT_TOOLS
 from chat_service.repositories import conversation_repository, message_repository
@@ -51,9 +50,13 @@ class ChatService:
         *,
         logger: "InferenceLogger | None" = None,
         registry: StreamRegistry | None = None,
+        raw_providers: RawProviders | None = None,
     ) -> None:
         self._logger = logger
         self._registry = registry or StreamRegistry()
+        # Pre-built at boot in main.lifespan. None only in tests or when
+        # the SDK logger wasn't available — the raw-* models then 503.
+        self._raw = raw_providers or RawProviders(logger=logger)
 
     @property
     def registry(self) -> StreamRegistry:
@@ -80,17 +83,16 @@ class ChatService:
         history = await load_window(session, convo.id)
 
         if is_raw_model(chosen_model):
-            # Direct OpenAI / Anthropic via inferspect-sdk.integrations.*.instrument()
-            # — no LangChain, no tools, no agent loop. Auto-traced via the
-            # monkey-patched provider client. logger.context(...) inside
-            # chat_raw stamps conversation_id/user_id on the span.
-            raw = await chat_raw(
+            # Direct OpenAI / Anthropic via the pre-built RawProviders
+            # (instrumented once at boot in main.lifespan). No LangChain,
+            # no tools, no agent loop. logger.context(...) inside chat()
+            # stamps conversation_id/user_id on the span.
+            raw = await self._raw.chat(
                 model=chosen_model,
                 system_prompt=SYSTEM_PROMPT,
                 history=history,
                 conversation_id=convo.id,
                 user_id=user.id,
-                sdk_logger=self._logger,
             )
             assistant_content = raw.content
             inference_request_id = None
@@ -219,16 +221,16 @@ async def stream_send(
     try:
         async with chat_svc._registry.register_current_task(convo.id):
             if raw_path:
-                # Direct provider streaming via inferspect-sdk auto-instrumentation.
-                # No LangChain agent, no tool calls, no callback — just the
-                # vendor SDK's stream API wrapped by instrument()'s monkey-patch.
-                async for text in stream_chat_raw(
+                # Direct provider streaming via the pre-built RawProviders
+                # factory. instrument() ran once at boot — the client method
+                # is already monkey-patched and emits inference logs as it
+                # streams. No LangChain agent, no tools, no callback.
+                async for text in chat_svc._raw.stream_chat(
                     model=chosen_model,
                     system_prompt=SYSTEM_PROMPT,
                     history=history,
                     conversation_id=convo.id,
                     user_id=user.id,
-                    sdk_logger=chat_svc._logger,
                 ):
                     if text:
                         chunks.append(text)

@@ -20,6 +20,7 @@ from chat_service.controllers import (
 )
 from chat_service.db.models import Base
 from chat_service.db.session import get_engine, init_engine
+from chat_service.llm.raw_providers import RawProviders
 from chat_service.services.chat_service import ChatService
 from chat_service.services.conversation_service import ConversationService
 
@@ -50,12 +51,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.warning("SDK init failed; running without inference logging: %s", exc)
         sdk_logger = None
 
+    # Build the raw-provider clients ONCE at boot. The SDK's
+    # `instrument()` runs inside here and monkey-patches the provider
+    # methods for the lifetime of the process. After this line, every
+    # chat through a raw-* model is auto-traced.
+    raw_providers = RawProviders(logger=sdk_logger)
+
     registry = StreamRegistry()
     app.state.engine = engine
     app.state.stream_registry = registry
-    app.state.chat_service = ChatService(logger=sdk_logger, registry=registry)
+    app.state.chat_service = ChatService(
+        logger=sdk_logger,
+        registry=registry,
+        raw_providers=raw_providers,
+    )
     app.state.conversation_service = ConversationService()
     app.state.sdk_logger = sdk_logger
+    app.state.raw_providers = raw_providers
 
     log.info("chat-service startup complete (db=%s)", settings.database_url.split("@")[-1])
     try:
