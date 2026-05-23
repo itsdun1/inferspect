@@ -31,6 +31,12 @@ from chat_service.llm.langchain_adapter import provider_for, to_lc_messages
 from chat_service.llm.memory import load_window
 from chat_service.llm.prompts import SYSTEM_PROMPT
 from chatbot_sdk.integrations.langchain import SDKCallback
+from chat_service.llm.raw_providers import (
+    chat_raw,
+    is_raw_model,
+    provider_for_raw,
+    stream_chat_raw,
+)
 from chat_service.llm.tools import DEFAULT_TOOLS
 from chat_service.repositories import conversation_repository, message_repository
 from chat_service.schemas import SendMessageResponse
@@ -72,27 +78,44 @@ class ChatService:
         await conversation_repository.bump_for_message(session, convo.id, model=chosen_model)
 
         history = await load_window(session, convo.id)
-        lc_messages = [SystemMessage(content=SYSTEM_PROMPT), *to_lc_messages(history)]
 
-        agent = build_agent(chosen_model, tools=DEFAULT_TOOLS)
-        callback = self._make_callback(convo.id, user.id, chosen_model)
+        if is_raw_model(chosen_model):
+            # Direct OpenAI / Anthropic via inferspect-sdk.integrations.*.instrument()
+            # — no LangChain, no tools, no agent loop. Auto-traced via the
+            # monkey-patched provider client. logger.context(...) inside
+            # chat_raw stamps conversation_id/user_id on the span.
+            raw = await chat_raw(
+                model=chosen_model,
+                system_prompt=SYSTEM_PROMPT,
+                history=history,
+                conversation_id=convo.id,
+                user_id=user.id,
+                sdk_logger=self._logger,
+            )
+            assistant_content = raw.content
+            inference_request_id = None
+        else:
+            lc_messages = [SystemMessage(content=SYSTEM_PROMPT), *to_lc_messages(history)]
+            agent = build_agent(chosen_model, tools=DEFAULT_TOOLS)
+            callback = self._make_callback(convo.id, user.id, chosen_model)
 
-        result: dict[str, Any] = await agent.ainvoke(
-            {"messages": lc_messages},
-            config={"callbacks": [callback] if callback else []},
-        )
+            result: dict[str, Any] = await agent.ainvoke(
+                {"messages": lc_messages},
+                config={"callbacks": [callback] if callback else []},
+            )
 
-        # The final message in the agent's state is the assistant response we
-        # show to the user. Anything earlier may be tool calls and tool results.
-        final_ai = _last_ai_message(result.get("messages", []))
-        assistant_content = _content_of(final_ai)
+            # The final message in the agent's state is the assistant response we
+            # show to the user. Anything earlier may be tool calls and tool results.
+            final_ai = _last_ai_message(result.get("messages", []))
+            assistant_content = _content_of(final_ai)
+            inference_request_id = getattr(callback, "last_inference_request_id", None)
 
         assistant_msg = await message_repository.create(
             session,
             conversation_id=convo.id,
             role="assistant",
             content=assistant_content,
-            inference_request_id=getattr(callback, "last_inference_request_id", None),
+            inference_request_id=inference_request_id,
         )
         await conversation_repository.bump_for_message(session, convo.id, model=chosen_model)
 
@@ -100,7 +123,7 @@ class ChatService:
             conversation_id=convo.id,
             user_message=_msg_dto(user_msg),
             assistant_message=_msg_dto(assistant_msg),
-            inference_request_id=getattr(callback, "last_inference_request_id", None),
+            inference_request_id=inference_request_id,
             latency_ms=None,
             total_tokens=None,
         )
@@ -179,52 +202,71 @@ async def stream_send(
     await conversation_repository.bump_for_message(session, convo.id, model=chosen_model)
     await session.commit()
 
+    raw_path = is_raw_model(chosen_model)
     yield _sse("start", {
         "conversation_id": str(convo.id),
         "user_message_id": str(user_msg.id),
         "model": chosen_model,
-        "provider": provider_for(chosen_model),
+        "provider": provider_for_raw(chosen_model) if raw_path else provider_for(chosen_model),
     })
 
     history = await load_window(session, convo.id)
-    lc_messages = [SystemMessage(content=SYSTEM_PROMPT), *to_lc_messages(history)]
-    agent = build_agent(chosen_model, tools=DEFAULT_TOOLS)
-    callback = chat_svc._make_callback(convo.id, user.id, chosen_model)
 
     chunks: list[str] = []
     cancelled = False
+    callback = None
 
     try:
         async with chat_svc._registry.register_current_task(convo.id):
-            async for event in agent.astream_events(
-                {"messages": lc_messages},
-                version="v2",
-                config={"callbacks": [callback] if callback else []},
-            ):
-                kind = event.get("event")
-                if kind == "on_chat_model_stream":
-                    chunk = event.get("data", {}).get("chunk")
-                    text = _content_of(chunk)
+            if raw_path:
+                # Direct provider streaming via inferspect-sdk auto-instrumentation.
+                # No LangChain agent, no tool calls, no callback — just the
+                # vendor SDK's stream API wrapped by instrument()'s monkey-patch.
+                async for text in stream_chat_raw(
+                    model=chosen_model,
+                    system_prompt=SYSTEM_PROMPT,
+                    history=history,
+                    conversation_id=convo.id,
+                    user_id=user.id,
+                    sdk_logger=chat_svc._logger,
+                ):
                     if text:
                         chunks.append(text)
                         yield _sse("delta", {"content": text})
-                elif kind == "on_tool_start":
-                    name = event.get("name", "")
-                    raw_input = event.get("data", {}).get("input")
-                    yield _sse("tool_call", {
-                        "name": name,
-                        "args": _safe_args(raw_input),
-                    })
-                elif kind == "on_tool_end":
-                    name = event.get("name", "")
-                    out = event.get("data", {}).get("output")
-                    yield _sse("tool_result", {
-                        "name": name,
-                        "result": _tool_result_text(out),
-                    })
+            else:
+                lc_messages = [SystemMessage(content=SYSTEM_PROMPT), *to_lc_messages(history)]
+                agent = build_agent(chosen_model, tools=DEFAULT_TOOLS)
+                callback = chat_svc._make_callback(convo.id, user.id, chosen_model)
+
+                async for event in agent.astream_events(
+                    {"messages": lc_messages},
+                    version="v2",
+                    config={"callbacks": [callback] if callback else []},
+                ):
+                    kind = event.get("event")
+                    if kind == "on_chat_model_stream":
+                        chunk = event.get("data", {}).get("chunk")
+                        text = _content_of(chunk)
+                        if text:
+                            chunks.append(text)
+                            yield _sse("delta", {"content": text})
+                    elif kind == "on_tool_start":
+                        name = event.get("name", "")
+                        raw_input = event.get("data", {}).get("input")
+                        yield _sse("tool_call", {
+                            "name": name,
+                            "args": _safe_args(raw_input),
+                        })
+                    elif kind == "on_tool_end":
+                        name = event.get("name", "")
+                        out = event.get("data", {}).get("output")
+                        yield _sse("tool_result", {
+                            "name": name,
+                            "result": _tool_result_text(out),
+                        })
 
         full = "".join(chunks)
-        request_id = getattr(callback, "last_inference_request_id", None)
+        request_id = getattr(callback, "last_inference_request_id", None) if callback else None
         assistant_msg = await message_repository.create(
             session,
             conversation_id=convo.id,
@@ -239,14 +281,14 @@ async def stream_send(
         yield _sse("done", {
             "assistant_message_id": str(assistant_msg.id),
             "inference_request_id": str(request_id) if request_id else None,
-            "tool_calls": getattr(callback, "tool_calls_made", []),
+            "tool_calls": getattr(callback, "tool_calls_made", []) if callback else [],
         })
 
     except asyncio.CancelledError:
         cancelled = True
         await session.rollback()
         partial = "".join(chunks)
-        request_id = getattr(callback, "last_inference_request_id", None)
+        request_id = getattr(callback, "last_inference_request_id", None) if callback else None
         assistant_msg = await message_repository.create(
             session,
             conversation_id=convo.id,

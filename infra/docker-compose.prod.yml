@@ -108,14 +108,31 @@ services:
     image: ollive/python:dev
     restart: unless-stopped
     environment:
+      # ClickHouse — analytics reads
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "8123"
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ollive}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-ollivepass}
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-ollive}
+      # Postgres — operator + cross-tenant reads (Phase D)
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-ollive}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ollivepass}
+      POSTGRES_DB: ${POSTGRES_DB:-ollive}
+      # Operator console auth (separate from chat-service)
+      CONSOLE_JWT_SECRET: ${CONSOLE_JWT_SECRET:?CONSOLE_JWT_SECRET required}
+      CONSOLE_BOOTSTRAP_EMAIL: ${CONSOLE_BOOTSTRAP_EMAIL:-operator@ollive.example.com}
+      CONSOLE_BOOTSTRAP_PASSWORD: ${CONSOLE_BOOTSTRAP_PASSWORD:?CONSOLE_BOOTSTRAP_PASSWORD required}
+      # SDK — admin/synthetic uses the logger to seed events
+      INGESTION_URL: http://ingestion-service:8001/v1/logs
+      SDK_API_KEY: ${SDK_API_KEY:-local-dev-sdk-key}
+      ALLOWED_ORIGINS: https://insights.${DOMAIN}
     command: ["uvicorn", "insights_api.main:app", "--host", "0.0.0.0", "--port", "8003"]
     depends_on:
       clickhouse:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   chat-service:

@@ -26,15 +26,23 @@ import type {
 type ToolEvent = { name: string; args: string; result?: string };
 type MessageWithTools = Message & { tools?: ToolEvent[] };
 
-// Models the chat-service exposes. Keep this in sync with langchain_adapter.py.
-// Provider is routed via name prefix (gpt*/o1* → OpenAI, claude* → Anthropic, gemini* → Google).
+// Models the chat-service exposes. Two integration paths — both produce the
+// same logs in ClickHouse via inferspect-sdk:
+//   - LangChain path: gpt-4o / claude-* / gemini-* → uses SDKCallback
+//   - Direct provider path: raw-openai/* and raw-anthropic/* → uses instrument()
 const MODELS = [
-  { value: "gpt-4o", label: "GPT-4o" },
-  { value: "gpt-4o-mini", label: "GPT-4o Mini" },
-  { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
-  { value: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5" },
-  { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  // LangChain path (SDKCallback)
+  { value: "gpt-4o", label: "GPT-4o (LangChain)" },
+  { value: "gpt-4o-mini", label: "GPT-4o Mini (LangChain)" },
+  { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 (LangChain)" },
+  { value: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5 (LangChain)" },
+  { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro (LangChain)" },
+  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash (LangChain)" },
+  // Direct provider path (chatbot_sdk.integrations.{openai,anthropic}.instrument)
+  { value: "raw-openai/gpt-4o", label: "GPT-4o (Direct OpenAI SDK)" },
+  { value: "raw-openai/gpt-4o-mini", label: "GPT-4o Mini (Direct OpenAI SDK)" },
+  { value: "raw-anthropic/claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 (Direct Anthropic SDK)" },
+  { value: "raw-anthropic/claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5 (Direct Anthropic SDK)" },
 ] as const;
 
 const DEFAULT_MODEL = MODELS[0].value;
