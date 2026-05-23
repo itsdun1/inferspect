@@ -19,7 +19,6 @@ resources:
   - postgres
   - valkey
   - clickhouse
-  - grafana
   - chat-service
   - ingestion-service
   - inference-consumer
@@ -37,16 +36,6 @@ configMapGenerator:
   - name: clickhouse-init
     files:
       - init.sql=../../clickhouse/init.sql
-  - name: grafana-datasources
-    files:
-      - clickhouse.yaml=../../grafana/provisioning/datasources/clickhouse.yaml
-  - name: grafana-dashboards-provisioning
-    files:
-      - default.yaml=../../grafana/provisioning/dashboards/default.yaml
-  - name: grafana-dashboards
-    files:
-      - inference-latency.json=../../grafana/dashboards/inference-latency.json
-      - inference-throughput.json=../../grafana/dashboards/inference-throughput.json
 
 generatorOptions:
   disableNameSuffixHash: true
