@@ -177,6 +177,10 @@ services:
         # Bundled into the JS at build time. The Next.js app fetches relative
         # paths (e.g. /auth/login) against this base; Caddy rewrites
         # /api/chat/* → chat-service:8000.
+        # Base for chat-service calls. The web-chat client posts to
+        # ${URL}/auth/login and ${URL}/conversations etc. — Caddy on
+        # chat.${DOMAIN} matches /api/chat/* and strips /api/chat (NOT
+        # just /api) so backend sees /auth/login, /conversations etc.
         NEXT_PUBLIC_CHAT_API_URL: https://chat.${DOMAIN}/api/chat
     image: ollive/web-chat:dev
     restart: unless-stopped
@@ -197,7 +201,12 @@ services:
       context: ..
       dockerfile: apps/web-insights/Dockerfile
       args:
-        NEXT_PUBLIC_INSIGHTS_API_URL: https://insights.${DOMAIN}/api/insights
+        # Base for insights-api calls. The web-insights client posts to
+        # ${URL}/auth/login, ${URL}/admin/users, ${URL}/insights/summary etc.
+        # Caddy on insights.${DOMAIN} matches /api/* and strips only /api
+        # (NOT /api/insights), so the backend sees /auth/login, /admin/users,
+        # /insights/summary. So this base ends at /api, not /api/insights.
+        NEXT_PUBLIC_INSIGHTS_API_URL: https://insights.${DOMAIN}/api
     image: ollive/web-insights:dev
     restart: unless-stopped
     ports:
