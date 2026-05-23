@@ -162,7 +162,11 @@ def _normalize_response(response: Any) -> SimpleNamespace:
 
 
 def _normalize_chunk(chunk: Any) -> SimpleNamespace:
-    """Pack an OpenAI ChatCompletionChunk into observe_chunk's expected shape."""
+    """Pack an OpenAI ChatCompletionChunk into observe_chunk's expected shape.
+
+    When ``stream_options={"include_usage": True}`` is set on the original
+    call, OpenAI sends a FINAL chunk with empty ``choices`` and a populated
+    ``usage``. We extract it here so InferenceSpan can record the totals."""
     content = ""
     tool_call_chunks: list[dict[str, Any]] = []
     try:
@@ -177,10 +181,21 @@ def _normalize_chunk(chunk: Any) -> SimpleNamespace:
                 tool_call_chunks.append({"name": name or "", "args": raw_args or ""})
     except (AttributeError, IndexError, TypeError):
         pass
+
+    # Token usage — usually only on the FINAL chunk when include_usage is on.
+    usage = getattr(chunk, "usage", None)
+    usage_metadata: dict[str, int] | None = None
+    if usage is not None:
+        usage_metadata = {
+            "input_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+            "output_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+        }
+
     return SimpleNamespace(
         content=content,
         tool_call_chunks=tool_call_chunks,
-        usage_metadata=None,
+        usage_metadata=usage_metadata,
     )
 
 

@@ -41,9 +41,22 @@ const WINDOWS = [
   { value: "30d", label: "Last 30d" },
 ] as const;
 
+// Tenant filter — every event in ClickHouse is tagged with a `client` value
+// resolved server-side from the SDK key. "All clients" leaves the filter off
+// so the operator sees aggregate across every customer.
+const ALL_CLIENTS = "__all__";
+
+function withClient(path: string, client: string): string {
+  if (client === ALL_CLIENTS) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}client=${encodeURIComponent(client)}`;
+}
+
 export default function InsightsPage() {
   const [operator, setOperator] = useState<AuthUser | null>(null);
   const [windowSel, setWindowSel] = useState<string>("1h");
+  const [clientSel, setClientSel] = useState<string>(ALL_CLIENTS);
+  const [knownClients, setKnownClients] = useState<string[]>([]);
   const [latency, setLatency] = useState<FetchState<LatencyPoint[]>>(emptyState());
   const [throughput, setThroughput] = useState<FetchState<ThroughputPoint[]>>(
     emptyState(),
@@ -71,47 +84,54 @@ export default function InsightsPage() {
     return () => { cancelled = true; };
   }, []);
 
+  // Known tenants. For now we hardcode the in-house chat-service since that's
+  // our only customer. When more land on the platform, swap this for a query
+  // to a future /insights/clients endpoint that returns the distinct list.
   useEffect(() => {
-    // Re-fetch whenever the time window changes. The insights-api returns
-    // wrapped objects ({buckets|by_group|conversations: [...]}); unwrap to
-    // the bare array each chart component expects.
+    setKnownClients(["chat-service"]);
+  }, []);
+
+  useEffect(() => {
+    // Re-fetch whenever the time window OR client filter changes. The
+    // insights-api returns wrapped objects ({buckets|by_group|conversations:
+    // [...]}); unwrap to the bare array each chart component expects.
     void load(async () => {
       const r = await insightsApi.get<{ buckets: LatencyPoint[] }>(
-        `/insights/latency?window=${windowSel}&group=model`,
+        withClient(`/insights/latency?window=${windowSel}&group=model`, clientSel),
       );
       return r.buckets ?? [];
     }, setLatency);
     void load(async () => {
       const r = await insightsApi.get<{ buckets: ThroughputPoint[] }>(
-        `/insights/throughput?window=${windowSel}`,
+        withClient(`/insights/throughput?window=${windowSel}`, clientSel),
       );
       return r.buckets ?? [];
     }, setThroughput);
     void load(async () => {
       const r = await insightsApi.get<{ by_group: CostPoint[] }>(
-        `/insights/cost?window=${windowSel}&group=model`,
+        withClient(`/insights/cost?window=${windowSel}&group=model`, clientSel),
       );
       return r.by_group ?? [];
     }, setCost);
     void load(async () => {
       const r = await insightsApi.get<{ conversations: TopConversation[] }>(
-        `/insights/top-conversations?metric=latency&limit=20&window=${windowSel}`,
+        withClient(`/insights/top-conversations?metric=latency&limit=20&window=${windowSel}`, clientSel),
       );
       return r.conversations ?? [];
     }, setTop);
     void load(async () => {
       const r = await insightsApi.get<{ groups: ErrorsGroup[] }>(
-        `/insights/errors?window=${windowSel}`,
+        withClient(`/insights/errors?window=${windowSel}`, clientSel),
       );
       return r.groups ?? [];
     }, setErrors);
     void load(async () => {
       const r = await insightsApi.get<{ tools: ToolStat[] }>(
-        `/insights/tools?window=${windowSel}`,
+        withClient(`/insights/tools?window=${windowSel}`, clientSel),
       );
       return r.tools ?? [];
     }, setTools);
-  }, [windowSel]);
+  }, [windowSel, clientSel]);
 
   // Drill-down fetch when user clicks a conversation row.
   useEffect(() => {
@@ -147,6 +167,22 @@ export default function InsightsPage() {
           <p className="text-xs text-gray-500">Live LLM telemetry from ClickHouse.</p>
         </div>
         <div className="flex items-center gap-3">
+          <label htmlFor="client" className="text-xs text-gray-500">
+            Client
+          </label>
+          <select
+            id="client"
+            value={clientSel}
+            onChange={(e) => setClientSel(e.target.value)}
+            className="rounded-md border border-gray-300 bg-white px-2 py-1 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          >
+            <option value={ALL_CLIENTS}>All clients</option>
+            {knownClients.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
           <label htmlFor="window" className="text-xs text-gray-500">
             Window
           </label>

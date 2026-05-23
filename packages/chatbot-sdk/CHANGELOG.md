@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 — 2026-05-23
+
+### Fixed
+- `chatbot_sdk.integrations.openai._normalize_chunk` now reads `chunk.usage`
+  when present. With `stream_options={"include_usage": True}` set on the
+  patched `chat.completions.create`, the final streaming chunk carries the
+  token totals — previously they were dropped, leading to `prompt_tokens=0`
+  and `completion_tokens=0` for auto-instrumented OpenAI streams.
+
 ## 0.2.0 — 2026-05-23
 
 First public release.

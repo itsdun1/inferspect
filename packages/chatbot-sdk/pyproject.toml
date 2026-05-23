@@ -1,6 +1,6 @@
 [project]
 name = "inferspect-sdk"
-version = "0.2.0"
+version = "0.2.1"
 description = "Lightweight Python SDK for capturing LLM inference, tool execution, and application logs with client-side PII redaction."
 readme = "README.md"
 license = {text = "MIT"}
