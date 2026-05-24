@@ -1587,7 +1587,7 @@ requires-dist = [
 
 [[package]]
 name = "inferspect-sdk"
-version = "0.2.0"
+version = "0.2.2"
 source = { editable = "packages/chatbot-sdk" }
 dependencies = [
     { name = "httpx" },
