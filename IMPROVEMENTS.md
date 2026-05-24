@@ -184,8 +184,109 @@ operator surfaces, and surfaced SDK overhead in the live dashboard.
 | `packages/chatbot-sdk/examples/` | 8 customer-facing samples |
 | `packages/chatbot-sdk/CHANGELOG.md` | Per-version diff |
 | `apps/chat-service/Dockerfile` | Standalone build that pip-installs from PyPI |
-| `apps/chat-service/chat_service/llm/raw_providers.py` | Customer-side dispatch for direct OpenAI / Anthropic |
+| `apps/chat-service/chat_service/llm/sdk_integrations.py` | Single factory: instrumented OpenAI/Anthropic clients + LangChain callback builder |
 | `apps/insights-api/insights_api/auth/` | Operator auth, separate cookie + JWT secret |
 | `apps/web-chat/` and `apps/web-insights/` | The two Next.js apps |
 | `infra/caddy/Caddyfile` | Subdomain routing + Let's Encrypt |
 | `infra/docker-compose.prod.yml` | Production compose, used on Oracle VM |
+
+---
+
+## What the ingestion-service actually does
+
+The ingestion-service is the **only** server the SDK talks to. It's the gate between customer processes and our ClickHouse store. Lives at `apps/ingestion-service/`. Every batch the SDK POSTs to `/v1/logs` goes through these stages, in order:
+
+```
+SDK POSTs batch  →  /v1/logs
+        │
+        ▼
+  ╭─ AUTH (auth_service.ApiKeyResolver) ──────────────────╮
+  │ Reads X-Sdk-Key header                                │
+  │ Looks it up in SDK_API_KEYS_JSON env map              │
+  │ Returns client_name (e.g. "chat-service") OR 401      │
+  ╰───────────────────────────────────────────────────────╯
+        │
+        ▼
+  ╭─ VALIDATE (validation_service) ───────────────────────╮
+  │ Pydantic schema check per event                       │
+  │ Rejects malformed events (bad provider, missing       │
+  │ request_id, wrong log_type, etc.)                     │
+  │ Per-event success/reject decision — bad ones drop,    │
+  │ good ones continue                                    │
+  ╰───────────────────────────────────────────────────────╯
+        │
+        ▼
+  ╭─ IDEMPOTENCY (idempotency_repository) ────────────────╮
+  │ For each event's request_id, mark_or_check() in       │
+  │ Valkey with TTL. If already seen → drop (returns      │
+  │ duplicates count in response). Protects against       │
+  │ SDK retries that succeed on the second attempt        │
+  │ (avoids double-counting).                             │
+  ╰───────────────────────────────────────────────────────╯
+        │
+        ▼
+  ╭─ TENANT STAMP (ingest_service) ───────────────────────╮
+  │ Adds event["client"] = client_name resolved at auth   │
+  │ stage. SDK left this empty; server is the source of   │
+  │ truth (SDK can't be trusted to self-identify).        │
+  ╰───────────────────────────────────────────────────────╯
+        │
+        ▼
+  ╭─ PII REDACTION (pii_service, defense-in-depth) ───────╮
+  │ Presidio-based regex pass on input_preview /          │
+  │ output_preview / args_preview / result_preview /      │
+  │ error_message. No-op if SDK already redacted (will    │
+  │ just see <EMAIL_ADDRESS> tokens, leave them).         │
+  │ Catches anything that slipped past the SDK.           │
+  ╰───────────────────────────────────────────────────────╯
+        │
+        ▼
+  ╭─ PUBLISH (valkey_publisher) ──────────────────────────╮
+  │ XADD to Valkey stream:                                │
+  │   - inference.v1       (for InferenceLog events)      │
+  │   - tool_executions.v1 (for ToolExecutionLog)         │
+  │   - application.v1     (for ApplicationLog)           │
+  │ Stream entries trigger consumers downstream.          │
+  ╰───────────────────────────────────────────────────────╯
+        │
+        ▼
+  Return JSON to SDK:
+    {"accepted": 4, "duplicates": 1, "rejected": 0,
+     "events": [{ "request_id": ..., "status": "accepted" }, ...]}
+```
+
+After ingestion publishes to Valkey, the **consumers** (inference-consumer + app-log-consumer) pull from the streams and bulk-INSERT into ClickHouse. Ingestion never writes to ClickHouse directly — that's the consumer's job. This keeps ingestion's hot path tiny (every event hits Valkey in <2ms) and lets the slow ClickHouse writes happen in a separate process.
+
+Stage-by-stage responsibilities:
+
+| Stage | File | What it owns |
+|---|---|---|
+| Auth | `services/auth_service.py` (`ApiKeyResolver`) | Static env-driven `{api_key: client_name}` map. Single source of truth for which tenant each SDK key belongs to. |
+| Validation | `services/validation_service.py` | Pydantic schema enforcement. Splits a mixed batch into accepted/rejected without rejecting the whole thing. |
+| Idempotency | `repositories/idempotency_repository.py` | Valkey `SETNX request_id` with TTL. Per-event dedup. |
+| Stamping | `services/ingest_service.py` (`ingest_batch`) | Orchestrates the pipeline; stamps `client`, `received_at`, returns the per-event status list. |
+| PII | `services/pii_service.py` | Presidio (or regex fallback) — defense in depth behind SDK-side redaction. |
+| Publish | `repositories/valkey_publisher.py` | Routes by `log_type` to one of three Valkey streams. |
+
+The `/v1/logs` endpoint itself is just a FastAPI controller (`controllers/ingest_controller.py`) that wires Depends-injected auth + service + repository together and returns the response Pydantic model.
+
+---
+
+## Transport options — what we could ship next instead of HTTPS POST
+
+Today the SDK ships logs over HTTPS POST to `/v1/logs`. That's the simplest universal transport but not the only choice. Realistic alternatives, ranked by relevance:
+
+| Option | What it'd look like | Why it'd matter |
+|---|---|---|
+| **OTLP exporter** | SDK emits OpenTelemetry-protocol spans; customer routes them to us OR any OTLP collector (Honeycomb, Datadog, Jaeger, Grafana Tempo) | Removes vendor lock-in. Customer keeps the option to switch backends. Helicone pivoted to OTLP recently for exactly this. |
+| **gRPC** | Same SDK→server flow, swap JSON over HTTPS for Protobuf over HTTP/2 | ~3× smaller payloads, multiplexed connections, native streaming. Matters at 10K+ events/sec. |
+| **Local sidecar agent** | SDK writes JSON Lines to Unix socket or `localhost:8085`; an OpenTelemetry Collector / Vector / Fluent Bit sidecar handles the network | Customer process never makes outbound network calls. Common in K8s. Agent buffers to disk during ingestion outages. |
+| **Message broker (Kafka / NATS / Redis Streams)** | SDK produces directly to broker; ingestion-service is just a consumer | Massive durability (broker retains for days). Ingestion can be down for hours, zero data loss. Adds broker creds to customer's env. |
+| **Cloud-native pub/sub (Kinesis / Pub/Sub / Event Hubs)** | SDK uses cloud's managed queue; downstream consumer drains | Zero infrastructure for cloud-native customers, integrates with their IAM. Vendor-locked per cloud. |
+| **WebSocket / SSE** | Persistent connection from SDK to ingestion, push events as they happen | Real-time dashboards (<1s end-to-end latency). Connection state to manage on both sides. |
+| **UDP / StatsD-style** | Fire-and-forget UDP packets, ingestion reads from socket | Sub-millisecond send latency, no TCP handshake. **Not suitable** for inference logs (each event has billing value, can't tolerate silent packet loss). |
+| **stdout + log shipper** | SDK `print()`s JSON Lines; container runtime captures stdout; existing log infra (Fluent Bit, Loki, Splunk) forwards | Zero new dependencies. Customer's existing log pipeline is reused. Higher latency, depends on their infra. |
+
+The transport is abstracted behind `BatchedLogTransport` in the SDK (`packages/chatbot-sdk/chatbot_sdk/transport.py`), so adding a new one is a single class implementing the same `submit` / `start` / `close` interface. We could ship two transports side-by-side and let the customer pick via `ingestion_url` URI scheme (`https://...` vs `grpc://...` vs `otlp://...`).
+
+**Most strategically valuable next step:** an OTLP exporter. It opens the SDK to the entire observability ecosystem and answers the "what if I want to use Honeycomb instead?" objection with "you can — same SDK, different exporter URL."
