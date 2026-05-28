@@ -34,6 +34,7 @@ import (
 	"github.com/itsdun1/inferspect/apps/inferspect-agent/internal/kernel"
 	"github.com/itsdun1/inferspect/apps/inferspect-agent/internal/llm"
 	"github.com/itsdun1/inferspect/apps/inferspect-agent/internal/policy"
+	"github.com/itsdun1/inferspect/apps/inferspect-agent/internal/redact"
 	"github.com/itsdun1/inferspect/apps/inferspect-agent/internal/ringbuf"
 	"github.com/itsdun1/inferspect/apps/inferspect-agent/internal/uplink"
 )
@@ -252,6 +253,24 @@ func main() {
 			for _, ps := range tracker.SocketsForFingerprint(cmd.Fingerprint) {
 				preArmKernel(uint32(ps[0]), ps[1])
 			}
+			// Phase G.4 PII path — backend sends only the fingerprint
+			// (no raw user text, since input_preview is redacted before
+			// uplink). Reconstruct the kernel content anchor from the
+			// agent's host-local tracker so the next outbound SSL_write
+			// carrying this conversation's first user message gets
+			// caught regardless of SSL_CTX rotation.
+			if firstUser := tracker.FirstUserTextForFingerprint(cmd.Fingerprint); firstUser != "" {
+				anchorBytes := buildLocalAnchor(firstUser)
+				if len(anchorBytes) >= 16 {
+					if slot, err := anchorStore.Arm(cmd.CommandID, anchorBytes, [32]byte{}); err != nil {
+						log.Printf("downlink: local anchor arm failed for fp=%s: %v",
+							cmd.Fingerprint[:min(8, len(cmd.Fingerprint))], err)
+					} else {
+						log.Printf("downlink: local anchor armed cmd=%s slot=%d anchor=%dB (built from host-local tracker)",
+							cmd.CommandID, slot, len(anchorBytes))
+					}
+				}
+			}
 		case "block_conversation":
 			log.Printf("downlink: block_conversation %s (reason=%s ttl=%ds)",
 				cmd.Fingerprint[:min(8, len(cmd.Fingerprint))]+"...", cmd.Reason, cmd.TTLSeconds)
@@ -452,7 +471,7 @@ func handleRequest(
 		"finished_at":     startedAt.Format(time.RFC3339Nano),
 		"latency_ms":      0,
 		"status":          "ok",
-		"input_preview":   safePreview(req.Body, 16384),
+		"input_preview":   redact.Text(safePreview(req.Body, 16384)),
 		"output_preview":  "",
 		"source":          "ebpf-agent",
 		"host_id":         hostInfo.HostID,
@@ -561,8 +580,8 @@ func handleResponse(resp httpreasm.Response, tx *uplink.Transport, rs *requestSt
 		// this, ClickHouse's ReplacingMergeTree dedupe on request_id keeps
 		// the stitched row (later received_at) and overwrites the
 		// request-time row whose preview we actually need.
-		"input_preview":     safePreview(rc.lastBody, 16384),
-		"output_preview":    safePreview([]byte(output), 500),
+		"input_preview":     redact.Text(safePreview(rc.lastBody, 16384)),
+		"output_preview":    redact.Text(safePreview([]byte(output), 500)),
 		"prompt_tokens":     usage.Prompt,
 		"completion_tokens": usage.Completion,
 		"total_tokens":      usage.Total,
@@ -704,6 +723,30 @@ func safePreview(b []byte, n int) string {
 		return string(b[:n])
 	}
 	return string(b)
+}
+
+// buildLocalAnchor constructs the kernel-side content anchor from the
+// raw first-user-message text, padded with the JSON wrapper context the
+// wire body uses so short messages still meet the BPF scan's
+// FIRST_SEG (16-byte) minimum. Mirrors the build_anchor() logic in the
+// backend's insights_api/services/anchor.py for the case where the
+// backend itself has the raw preview — but now lives on-host so PII
+// never leaves the customer machine.
+func buildLocalAnchor(firstUser string) []byte {
+	const minBytes = 16
+	const maxBytes = 128
+	raw := []byte(firstUser)
+	if len(raw) >= minBytes {
+		if len(raw) > maxBytes {
+			raw = raw[:maxBytes]
+		}
+		return raw
+	}
+	wrapped := []byte(`"content":"` + firstUser + `"`)
+	if len(wrapped) > maxBytes {
+		wrapped = wrapped[:maxBytes]
+	}
+	return wrapped
 }
 
 func awaitShutdown(cancel context.CancelFunc) {

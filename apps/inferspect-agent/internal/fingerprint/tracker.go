@@ -53,6 +53,13 @@ type Conversation struct {
 	// conversation creation. Lets the agent answer "what conversations
 	// match this fingerprint" so a kill-by-pattern can pre-arm too.
 	PrefixFingerprint string
+	// FirstUserText is the raw text of the conversation's first user
+	// message. Host-local only — NEVER ships off the host. Used by the
+	// downlink handler to build the kernel content-anchor when the
+	// operator issues a block_fingerprint kill. Keeping the raw bytes
+	// only on the customer machine is what lets us redact input_preview
+	// before uplink while still preserving the kill capability.
+	FirstUserText string
 }
 
 // Tracker holds the live conversation set.
@@ -142,6 +149,15 @@ func (t *Tracker) mintNew(pid uint32, sslCtx uint64, prefixFP string, messages [
 		t.evictOneLocked()
 	}
 	full := rollingHashOver(messages)
+	// Capture the first user message's raw text — host-local material that
+	// the downlink kill handler will need to build a content anchor.
+	firstUser := ""
+	for _, m := range messages {
+		if m.Role == "user" {
+			firstUser = m.Content
+			break
+		}
+	}
 	conv := &Conversation{
 		AgentID:           uuid.New(),
 		RollingHash:       full,
@@ -150,11 +166,36 @@ func (t *Tracker) mintNew(pid uint32, sslCtx uint64, prefixFP string, messages [
 		LastActivityNs:    nowNs,
 		LastSSLCtx:        sslCtx,
 		PrefixFingerprint: prefixFP,
+		FirstUserText:     firstUser,
 	}
 	t.byHash[full] = conv
 	t.byAgentID[conv.AgentID] = conv
 	t.created++
 	return conv
+}
+
+// FirstUserTextForFingerprint returns the raw first user-message text of
+// the most recently active conversation with the given prefix fingerprint.
+// Empty string if no live conversation matches. The downlink handler uses
+// this to build the kernel content anchor without the backend ever
+// seeing the raw bytes — the operator's kill command carries only the
+// fingerprint.
+func (t *Tracker) FirstUserTextForFingerprint(fp string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var latest *Conversation
+	for _, c := range t.byAgentID {
+		if c.PrefixFingerprint != fp {
+			continue
+		}
+		if latest == nil || c.LastActivityNs > latest.LastActivityNs {
+			latest = c
+		}
+	}
+	if latest == nil {
+		return ""
+	}
+	return latest.FirstUserText
 }
 
 // SocketsForFingerprint returns the (PID, SSL_CTX) of every conversation

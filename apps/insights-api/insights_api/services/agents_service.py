@@ -97,54 +97,12 @@ async def kill_fingerprint(
     if not fingerprint or len(fingerprint) != 64:
         raise ValueError("fingerprint must be a 64-char hex SHA256")
 
-    # Try the Phase G.4 anchor flow first: extract the latest user message
-    # from the most recent captured wire body for this (host, fingerprint)
-    # and send it as the kernel-side content anchor. Falls back to
-    # block_fingerprint when no preview is available (e.g., agent restart
-    # cleared the row that carried input_preview).
-    preview = await repo.preview_for_fingerprint(
-        ch_client, host_id=host_id, fingerprint=fingerprint, client=client,
-    )
-    if preview:
-        try:
-            anchor_bytes, expected_hash = anchor_svc.build_full_anchor(preview)
-        except ValueError as exc:
-            log.warning(
-                "fingerprint %s anchor extraction failed (%s) — falling back to block_fingerprint",
-                fingerprint[:16], exc,
-            )
-        else:
-            url = settings.ingestion_control_url.rstrip("/") + "/kill-anchor"
-            headers = {}
-            if settings.sdk_api_key:
-                headers["X-Sdk-Key"] = settings.sdk_api_key
-            payload = {
-                "host_id": host_id,
-                "anchor_b64": base64.b64encode(anchor_bytes).decode("ascii"),
-                "expected_hash_b64": base64.b64encode(expected_hash).decode("ascii"),
-                "reason": reason,
-                "ttl_seconds": ttl_seconds,
-                "operator_id": operator_id,
-            }
-            async with httpx.AsyncClient(timeout=5.0) as http:
-                resp = await http.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                body = resp.json()
-            try:
-                await repo.record_enforcement_event(
-                    ch_client,
-                    host_id=host_id,
-                    fingerprint=fingerprint,
-                    command="block_anchor",
-                    reason=reason,
-                    source="operator",
-                    client_name=client or "",
-                    operator_id=operator_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("enforcement_events insert failed (kill still issued): %s", exc)
-            return body
-
+    # Backend ships only the fingerprint — the agent reconstructs the
+    # kernel content-anchor from its host-local conversation tracker
+    # (raw user text never crossed the network because
+    # ``input_preview`` was redacted before uplink). See Phase G PII
+    # decision: PII redaction lives on the customer machine, kill
+    # capability is preserved by the agent's local tracker.
     url = settings.ingestion_control_url.rstrip("/") + "/kill"
     headers: dict[str, str] = {}
     if settings.sdk_api_key:
