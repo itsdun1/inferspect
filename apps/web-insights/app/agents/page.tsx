@@ -7,6 +7,7 @@ import {
   getAgents,
   getHostFingerprints,
   killOnHost,
+  unblockOnHost,
   type AgentRow,
   type HostFingerprint,
 } from "../../lib/api";
@@ -250,9 +251,20 @@ function KillableFingerprint({
   const [state, setState] = useState<
     | { status: "idle" }
     | { status: "loading" }
-    | { status: "ok" }
+    | { status: "killed" }
+    | { status: "unblocked" }
     | { status: "error"; message: string }
   >({ status: "idle" });
+
+  const explainError = (err: unknown, fallback: string): string => {
+    if (err instanceof ApiError) {
+      if (typeof err.body === "object" && err.body && "detail" in err.body) {
+        return String((err.body as { detail?: unknown }).detail);
+      }
+      return `HTTP ${err.status}`;
+    }
+    return fallback;
+  };
 
   const onKill = async () => {
     if (
@@ -268,17 +280,23 @@ function KillableFingerprint({
         fingerprint: fp.fingerprint,
         reason: "operator_kill_from_agents_page",
       });
-      setState({ status: "ok" });
+      setState({ status: "killed" });
+      setTimeout(onKilled, 500);
+    } catch (err) {
+      setState({ status: "error", message: explainError(err, "Kill failed") });
+    }
+  };
+
+  const onUnblock = async () => {
+    setState({ status: "loading" });
+    try {
+      await unblockOnHost(hostId, { fingerprint: fp.fingerprint });
+      setState({ status: "unblocked" });
       setTimeout(onKilled, 500);
     } catch (err) {
       setState({
         status: "error",
-        message:
-          err instanceof ApiError
-            ? typeof err.body === "object" && err.body && "detail" in err.body
-              ? String((err.body as { detail?: unknown }).detail)
-              : `HTTP ${err.status}`
-            : "Kill failed",
+        message: explainError(err, "Unblock failed"),
       });
     }
   };
@@ -300,17 +318,39 @@ function KillableFingerprint({
         {fp.preview || "—"}
       </td>
       <td className="px-2 py-1 text-right">
-        {state.status === "ok" ? (
-          <span className="text-xs text-emerald-700">Killed</span>
+        {state.status === "killed" ? (
+          <span className="inline-flex items-center gap-2">
+            <span className="text-xs text-emerald-700">Killed</span>
+            <button
+              type="button"
+              onClick={onUnblock}
+              className="rounded-md bg-gray-600 px-2 py-0.5 text-xs font-medium text-white shadow-sm hover:bg-gray-700"
+            >
+              Unblock
+            </button>
+          </span>
+        ) : state.status === "unblocked" ? (
+          <span className="text-xs text-gray-600">Unblocked</span>
         ) : (
-          <button
-            type="button"
-            onClick={onKill}
-            disabled={state.status === "loading"}
-            className="rounded-md bg-red-600 px-2 py-0.5 text-xs font-medium text-white shadow-sm hover:bg-red-700 disabled:opacity-50"
-          >
-            {state.status === "loading" ? "…" : "Kill"}
-          </button>
+          <span className="inline-flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onKill}
+              disabled={state.status === "loading"}
+              className="rounded-md bg-red-600 px-2 py-0.5 text-xs font-medium text-white shadow-sm hover:bg-red-700 disabled:opacity-50"
+            >
+              {state.status === "loading" ? "…" : "Kill"}
+            </button>
+            <button
+              type="button"
+              onClick={onUnblock}
+              disabled={state.status === "loading"}
+              className="rounded-md bg-gray-200 px-2 py-0.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-300 disabled:opacity-50"
+              title="Disarm any active block for this fingerprint"
+            >
+              Unblock
+            </button>
+          </span>
         )}
         {state.status === "error" ? (
           <p className="mt-0.5 text-[10px] text-red-700">{state.message}</p>

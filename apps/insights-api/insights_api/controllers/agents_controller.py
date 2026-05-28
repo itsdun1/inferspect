@@ -85,6 +85,26 @@ async def kill_on_host(
     return result
 
 
+class UnblockBody(BaseModel):
+    fingerprint: str = Field(min_length=64, max_length=64)
+
+
+@router.post(
+    "/{host_id}/unblock",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Disarm a previous block on this fingerprint. Clears SSL_CTX pre-arms and any anchor slot tied to the conversation's first user message.",
+)
+async def unblock_on_host(
+    host_id: str,
+    body: UnblockBody = Body(...),
+    operator: Operator = Depends(current_active_operator),  # noqa: ARG001
+) -> dict[str, Any]:
+    return await agents_service.unblock_fingerprint(
+        host_id=host_id,
+        fingerprint=body.fingerprint,
+    )
+
+
 @router.post(
     "/kill-session",
     status_code=status.HTTP_202_ACCEPTED,

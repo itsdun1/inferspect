@@ -136,6 +136,34 @@ async def kill_fingerprint(
     return body
 
 
+async def unblock_fingerprint(
+    *,
+    host_id: str,
+    fingerprint: str,
+) -> dict[str, Any]:
+    """Send an unblock_fingerprint command to the agent on ``host_id``.
+
+    The agent clears its policy store, the kernel blocked_ssl_contexts
+    pre-arms for any observed sockets, and any anchor slot whose bytes
+    match this fingerprint's first user message (built from the host-
+    local tracker — backend never holds the raw text).
+    """
+    if not fingerprint or len(fingerprint) != 64:
+        raise ValueError("fingerprint must be a 64-char hex SHA256")
+    url = settings.ingestion_control_url.rstrip("/") + "/unblock"
+    headers: dict[str, str] = {}
+    if settings.sdk_api_key:
+        headers["X-Sdk-Key"] = settings.sdk_api_key
+    payload = {
+        "host_id": host_id,
+        "fingerprint": fingerprint,
+    }
+    async with httpx.AsyncClient(timeout=5.0) as http:
+        resp = await http.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def kill_session(
     ch_client: Any,
     *,

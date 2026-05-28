@@ -236,6 +236,36 @@ func (s *AnchorStore) RecordKill(buffer []byte, kernelSlot int) (matchedSlot int
 	return matched, true
 }
 
+// DisarmIfAnchorMatches clears the first armed slot whose anchor bytes
+// equal ``wanted``. Returns the cleared slot index or -1. Used by the
+// downlink handler when the operator un-blocks a fingerprint — we look
+// up the corresponding anchor (built from the host-local tracker text)
+// and disarm any slot that holds it.
+func (s *AnchorStore) DisarmIfAnchorMatches(wanted []byte) int {
+	if len(wanted) == 0 {
+		return -1
+	}
+	s.mu.Lock()
+	slot := -1
+	for i := range s.slots {
+		if !s.slots[i].armed {
+			continue
+		}
+		if bytes.Equal(s.slots[i].anchor, wanted) {
+			slot = i
+			break
+		}
+	}
+	s.mu.Unlock()
+	if slot < 0 {
+		return -1
+	}
+	if err := s.Disarm(slot); err != nil {
+		return -1
+	}
+	return slot
+}
+
 // MatchBody is the Layer-2 user-space substring scan. Walks the armed
 // anchors and returns the first slot whose anchor bytes appear anywhere
 // in ``body``. Returns slot index (or -1), the matching anchor bytes,

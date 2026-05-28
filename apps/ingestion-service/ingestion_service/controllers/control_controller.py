@@ -148,6 +148,40 @@ async def kill_anchor(
     return KillAnchorResponse(**result)
 
 
+class UnblockRequest(BaseModel):
+    host_id: str
+    fingerprint: str = Field(min_length=64, max_length=64)
+
+
+class UnblockResponse(BaseModel):
+    command_id: str
+    cursor: str
+    host_id: str
+    fingerprint: str
+
+
+@router.post(
+    "/unblock",
+    response_model=UnblockResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Operator-triggered disarm — enqueue an unblock_fingerprint command.",
+)
+async def unblock(
+    body: UnblockRequest = Body(...),
+    client_name: str = Depends(require_api_key),
+    svc: ControlService = Depends(get_control_service),
+) -> UnblockResponse:
+    try:
+        result = await svc.unblock_fingerprint(
+            host_id=body.host_id,
+            fingerprint=body.fingerprint,
+            client=client_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return UnblockResponse(**result)
+
+
 @router.post(
     "/heartbeat",
     status_code=status.HTTP_202_ACCEPTED,

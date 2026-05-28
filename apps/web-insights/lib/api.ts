@@ -163,6 +163,20 @@ export async function killOnHost(
   return insightsApi.post<KillResult>(`/agents/${hostId}/kill`, body);
 }
 
+export interface UnblockResult {
+  command_id: string;
+  cursor: string;
+  fingerprint: string;
+  host_id: string;
+}
+
+export async function unblockOnHost(
+  hostId: string,
+  body: { fingerprint: string },
+): Promise<UnblockResult> {
+  return insightsApi.post<UnblockResult>(`/agents/${hostId}/unblock`, body);
+}
+
 export async function killSession(body: {
   session_id: string;
   reason?: string;

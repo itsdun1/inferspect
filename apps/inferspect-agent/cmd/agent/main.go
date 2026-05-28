@@ -282,6 +282,27 @@ func main() {
 			}
 		case "unblock_fingerprint":
 			policyStore.Unblock(cmd.Fingerprint)
+			// Clear every BPF-side enforcement state for this fingerprint:
+			// the SSL_CTX pre-arm map, the per-PID block (if any), and any
+			// content-anchor slot armed for this fingerprint's first user
+			// message. Otherwise the operator's "unblock" leaves the
+			// kernel still corrupting writes — confusing and dangerous.
+			cleared := 0
+			for _, ps := range tracker.SocketsForFingerprint(cmd.Fingerprint) {
+				sslCtx := ps[1]
+				if blockedSSL != nil {
+					_ = blockedSSL.Delete(&sslCtx)
+					cleared++
+				}
+			}
+			if firstUser := tracker.FirstUserTextForFingerprint(cmd.Fingerprint); firstUser != "" {
+				wanted := buildLocalAnchor(firstUser)
+				if slot := anchorStore.DisarmIfAnchorMatches(wanted); slot >= 0 {
+					log.Printf("downlink: unblock_fingerprint cleared anchor slot=%d", slot)
+				}
+			}
+			log.Printf("downlink: unblock_fingerprint %s — cleared %d SSL_ctx pre-arms",
+				cmd.Fingerprint[:min(8, len(cmd.Fingerprint))], cleared)
 		case "block_anchor":
 			// Phase G.4 — operator-issued content-anchor block. The
 			// payload carries the byte pattern (base64) the kernel

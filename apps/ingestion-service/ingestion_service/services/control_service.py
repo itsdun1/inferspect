@@ -89,6 +89,33 @@ class ControlService:
             "host_id": host_id,
         }
 
+    async def unblock_fingerprint(
+        self,
+        *,
+        host_id: str,
+        fingerprint: str,
+        client: str,
+    ) -> dict[str, Any]:
+        if not fingerprint or len(fingerprint) != 64:
+            raise ValueError("fingerprint must be a 64-char hex SHA256")
+        command = {
+            "command": "unblock_fingerprint",
+            "fingerprint": fingerprint,
+            "issued_at": datetime.now(UTC).isoformat(),
+            "command_id": str(uuid.uuid4()),
+        }
+        cursor = await self._queue.enqueue(host_id, command)
+        log.info(
+            "control unblock host=%s fingerprint=%s client=%s cursor=%s",
+            host_id, fingerprint[:8] + "...", client, cursor,
+        )
+        return {
+            "command_id": command["command_id"],
+            "cursor": cursor,
+            "fingerprint": fingerprint,
+            "host_id": host_id,
+        }
+
     async def kill_anchor(
         self,
         *,
