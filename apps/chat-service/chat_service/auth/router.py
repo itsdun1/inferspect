@@ -16,16 +16,22 @@ from chat_service.auth.deps import fastapi_users
 class UserRead(schemas.BaseUser[uuid.UUID]):
     model_config = ConfigDict(from_attributes=True)
 
+    # Override fastapi-users' EmailStr — pydantic v2's validator rejects
+    # reserved TLDs like ``.local`` which we use for local dev/demo accounts.
+    # Existing accounts already in the DB would otherwise fail to deserialize.
+    email: str  # type: ignore[assignment]
+
     role: str
     created_at: datetime
 
 
 class UserCreate(schemas.BaseUserCreate):
-    pass
+    # Same override on create so registration accepts ``.local``.
+    email: str  # type: ignore[assignment]
 
 
 class UserUpdate(schemas.BaseUserUpdate):
-    pass
+    email: str | None = None  # type: ignore[assignment]
 
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])

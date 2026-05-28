@@ -30,6 +30,10 @@ APPLICATION_COLUMNS: list[str] = [
     "message",
     "attributes",
     "client",
+    "source",
+    "host_id",
+    "process_id",
+    "container_id",
 ]
 
 
@@ -76,4 +80,7 @@ def _coerce(event: dict[str, Any], col: str) -> Any:
     # Tenant tag — non-Nullable in CH, default empty string when absent.
     if col == "client" and value is None:
         return ""
+    # Phase G origin tags.
+    if col in {"source", "host_id", "container_id"} and value is None:
+        return "" if col != "source" else "sdk"
     return value

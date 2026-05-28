@@ -14,7 +14,9 @@ from insights_api.auth import bootstrap_operator, operator_router
 from insights_api.config import settings
 from insights_api.controllers import (
     admin_controller,
+    agents_controller,
     anomalies_controller,
+    enforcement_controller,
     health_controller,
     metrics_controller,
     sessions_controller,
@@ -120,6 +122,8 @@ def create_app() -> FastAPI:
     app.include_router(anomalies_controller.router)
     app.include_router(tools_controller.router)
     app.include_router(admin_controller.router)
+    app.include_router(agents_controller.router)
+    app.include_router(enforcement_controller.router)
     return app
 
 

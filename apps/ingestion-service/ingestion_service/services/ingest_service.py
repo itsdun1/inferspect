@@ -82,12 +82,20 @@ class IngestService:
             # ship raw PII downstream)
             event_dict = self._pii.redact_event(event_dict)
 
-            # Idempotency
-            fresh = await self._idempotency.mark_or_check(request_id)
-            if not fresh:
-                duplicates += 1
-                statuses.append(EventStatus(request_id=request_id, status="duplicate"))
-                continue
+            # Idempotency — but bypass for response-stitched events. The
+            # Phase G eBPF agent emits a request-time event first (with
+            # request_id derived from ssl_ctx+started_at) and a follow-up
+            # response-time event with the SAME request_id but populated
+            # latency/tokens/finish_reason. ClickHouse's ReplacingMergeTree
+            # dedups at insert time; we let both events through here.
+            metadata = event_dict.get("metadata") or {}
+            stitched = isinstance(metadata, dict) and metadata.get("stitched") is True
+            if not stitched:
+                fresh = await self._idempotency.mark_or_check(request_id)
+                if not fresh:
+                    duplicates += 1
+                    statuses.append(EventStatus(request_id=request_id, status="duplicate"))
+                    continue
 
             try:
                 await self._publisher.publish(log.log_type, event_dict)

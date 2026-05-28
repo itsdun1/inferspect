@@ -108,3 +108,93 @@ export async function adminGenerateSynthetic(
 ): Promise<SyntheticResult> {
   return insightsApi.post<SyntheticResult>("/admin/synthetic", { count: 100, ...body });
 }
+
+// -- Agent fleet (Phase G) ----------------------------------------------------
+
+export interface AgentRow {
+  host_id: string;
+  last_seen: string | null;
+  is_live: boolean;
+  event_count: number;
+  container_id: string | null;
+  distinct_pids: number;
+  distinct_providers: number;
+}
+
+export async function getAgents(): Promise<{ agents: AgentRow[] }> {
+  return insightsApi.get<{ agents: AgentRow[] }>("/agents");
+}
+
+export interface KillResult {
+  command_id: string;
+  cursor: string;
+  fingerprint: string;
+  host_id: string;
+}
+
+export interface HostFingerprint {
+  fingerprint: string;
+  first_seen: string | null;
+  last_seen: string | null;
+  request_count: number;
+  preview: string;
+  model: string | null;
+  provider: string | null;
+  distinct_pids: number;
+}
+
+export async function getHostFingerprints(
+  hostId: string,
+  opts: { windowHours?: number; limit?: number } = {},
+): Promise<{ fingerprints: HostFingerprint[] }> {
+  const params = new URLSearchParams();
+  if (opts.windowHours) params.set("window_hours", String(opts.windowHours));
+  if (opts.limit) params.set("limit", String(opts.limit));
+  const q = params.toString();
+  return insightsApi.get<{ fingerprints: HostFingerprint[] }>(
+    `/agents/${encodeURIComponent(hostId)}/fingerprints${q ? `?${q}` : ""}`,
+  );
+}
+
+export async function killOnHost(
+  hostId: string,
+  body: { fingerprint: string; reason?: string; ttl_seconds?: number },
+): Promise<KillResult> {
+  return insightsApi.post<KillResult>(`/agents/${hostId}/kill`, body);
+}
+
+export async function killSession(body: {
+  session_id: string;
+  reason?: string;
+  ttl_seconds?: number;
+}): Promise<KillResult> {
+  return insightsApi.post<KillResult>("/agents/kill-session", body);
+}
+
+// -- Enforcement events (audit log) -------------------------------------------
+
+export interface EnforcementEvent {
+  timestamp: string;
+  host_id: string;
+  fingerprint: string;
+  command: string;
+  reason: string;
+  source: string;
+  client: string;
+  rule_id: string;
+  operator_id: string;
+  matched: number;
+}
+
+export async function getEnforcementEvents(
+  opts: { hostId?: string; windowHours?: number; limit?: number } = {},
+): Promise<{ events: EnforcementEvent[] }> {
+  const params = new URLSearchParams();
+  if (opts.hostId) params.set("host_id", opts.hostId);
+  if (opts.windowHours) params.set("window_hours", String(opts.windowHours));
+  if (opts.limit) params.set("limit", String(opts.limit));
+  const q = params.toString();
+  return insightsApi.get<{ events: EnforcementEvent[] }>(
+    `/enforcement-events${q ? `?${q}` : ""}`,
+  );
+}

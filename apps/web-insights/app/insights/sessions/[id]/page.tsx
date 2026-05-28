@@ -2,7 +2,7 @@
 
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
-import { ApiError, insightsApi } from "../../../../lib/api";
+import { ApiError, insightsApi, killSession } from "../../../../lib/api";
 import type {
   SessionTimeline,
   SessionTimelineEntry,
@@ -17,6 +17,37 @@ export default function SessionPage({ params }: PageProps) {
   const [timeline, setTimeline] = useState<SessionTimeline | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [killState, setKillState] = useState<
+    | { status: "idle" }
+    | { status: "loading" }
+    | { status: "ok"; fingerprint: string; host: string }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
+
+  const onKill = async () => {
+    if (!confirm("Block this conversation at the kernel? Subsequent requests will fail with a transport error.")) {
+      return;
+    }
+    setKillState({ status: "loading" });
+    try {
+      const result = await killSession({ session_id: id, reason: "operator_kill" });
+      setKillState({
+        status: "ok",
+        fingerprint: result.fingerprint,
+        host: result.host_id,
+      });
+    } catch (err) {
+      setKillState({
+        status: "error",
+        message:
+          err instanceof ApiError
+            ? typeof err.body === "object" && err.body && "detail" in err.body
+              ? String((err.body as { detail?: unknown }).detail)
+              : `HTTP ${err.status}`
+            : "Kill failed",
+      });
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -56,10 +87,35 @@ export default function SessionPage({ params }: PageProps) {
         >
           ← Back to insights
         </Link>
-        <h1 className="mt-2 text-lg font-semibold text-gray-900">
-          Session timeline
-        </h1>
-        <p className="font-mono text-xs text-gray-500">{id}</p>
+        <div className="mt-2 flex items-baseline justify-between gap-4">
+          <div>
+            <h1 className="text-lg font-semibold text-gray-900">
+              Session timeline
+            </h1>
+            <p className="font-mono text-xs text-gray-500">{id}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onKill}
+            disabled={killState.status === "loading" || killState.status === "ok"}
+            className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-red-700 disabled:opacity-50"
+          >
+            {killState.status === "loading"
+              ? "Killing…"
+              : killState.status === "ok"
+                ? "Killed"
+                : "Kill this conversation"}
+          </button>
+        </div>
+        {killState.status === "ok" ? (
+          <p className="mt-2 text-xs text-emerald-700">
+            Block command sent to host {killState.host}. Fingerprint{" "}
+            <span className="font-mono">{killState.fingerprint.slice(0, 12)}…</span>{" "}
+            now in kernel BPF map.
+          </p>
+        ) : killState.status === "error" ? (
+          <p className="mt-2 text-xs text-red-700">{killState.message}</p>
+        ) : null}
       </header>
 
       <main className="px-6 py-6">

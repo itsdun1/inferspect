@@ -14,14 +14,29 @@
 chat.{$DOMAIN} {
     # /api/chat/auth/login → chat-service:/auth/login
     # chat-service mounts routers at root, so strip the /api/chat prefix.
+    # chat-service runs inside the multipass VM (so the eBPF agent can
+    # observe its SSL_writes), not as a Docker compose service. Caddy
+    # reaches it via host.docker.internal which Docker Desktop maps to the
+    # host gateway; multipass forwards port 8000 to localhost.
     handle_path /api/chat/* {
-        reverse_proxy chat-service:8000
+        reverse_proxy host.docker.internal:8000
     }
 
     # /api/logs/* → ingestion-service. The chat UI itself doesn't currently
     # POST app logs, but exposing this here keeps SDK-from-browser as a
     # future option without another Caddy round-trip.
     handle_path /api/logs/* {
+        reverse_proxy ingestion-service:8001
+    }
+
+    # /api/control/* → ingestion-service. The eBPF agent (Phase G) talks to
+    # ingestion via the chat subdomain — same TLS path as /api/logs.
+    # ``handle`` (no path strip) preserves the /v1/control/* path the
+    # ingestion controller expects. We rewrite /api/control/poll →
+    # /v1/control/poll explicitly.
+    handle /api/control/* {
+        uri strip_prefix /api
+        rewrite * /v1{uri}
         reverse_proxy ingestion-service:8001
     }
 
@@ -52,6 +67,21 @@ insights.{$DOMAIN} {
         reverse_proxy insights-api:8003
     }
     handle /api/auth/* {
+        uri strip_prefix /api
+        reverse_proxy insights-api:8003
+    }
+
+    # /api/agents/* and /api/enforcement-events/* → insights-api
+    # (Phase G — operator agent fleet + enforcement log).
+    # Match the bare prefix too — the web UI hits ``/api/agents`` exactly to
+    # list the fleet; without both forms Caddy falls through to Next.js → 404.
+    @agents path /api/agents /api/agents/*
+    handle @agents {
+        uri strip_prefix /api
+        reverse_proxy insights-api:8003
+    }
+    @enforce path /api/enforcement-events /api/enforcement-events/*
+    handle @enforce {
         uri strip_prefix /api
         reverse_proxy insights-api:8003
     }

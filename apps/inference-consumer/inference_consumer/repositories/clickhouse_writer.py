@@ -53,6 +53,11 @@ INFERENCE_COLUMNS: list[str] = [
     "output_preview",
     "metadata",
     "client",
+    "source",
+    "host_id",
+    "process_id",
+    "container_id",
+    "fingerprint",
 ]
 
 TOOL_EXECUTION_COLUMNS: list[str] = [
@@ -76,6 +81,10 @@ TOOL_EXECUTION_COLUMNS: list[str] = [
     "result_size_bytes",
     "metadata",
     "client",
+    "source",
+    "host_id",
+    "process_id",
+    "container_id",
 ]
 
 
@@ -147,6 +156,15 @@ def _coerce(event: dict[str, Any], col: str) -> Any:
     # Tenant tag — non-Nullable in CH, default empty string when absent
     # (e.g. older events from before Phase C, or local dev with no key map).
     if col == "client" and value is None:
+        return ""
+    # Phase G origin tags. Non-Nullable in CH except process_id; default
+    # empty string when older SDK rows don't carry them.
+    if col in {"source", "host_id", "container_id", "fingerprint"} and value is None:
+        return "" if col != "source" else "sdk"
+    # finish_reason is LowCardinality(String) DEFAULT '' — non-Nullable in CH.
+    # The Pydantic field is Optional, so events that didn't conclude with a
+    # known reason serialize to None. Convert to the empty default.
+    if col == "finish_reason" and value is None:
         return ""
     # Boolean → UInt8.
     if isinstance(value, bool):

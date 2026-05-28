@@ -13,6 +13,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-ollive}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ollivepass}
       POSTGRES_DB: ${POSTGRES_DB:-ollive}
+    # Phase G — chat-service runs in the VM next to the eBPF agent so the
+    # agent can observe its outbound SSL_writes. The VM-side chat-service
+    # connects back here. Production deploys leave this commented.
+    ports:
+      - "0.0.0.0:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -67,8 +72,17 @@ services:
       SDK_API_KEY: "${SDK_API_KEY:-}"
       # Env-driven key→client tenant map (Phase C). Without this, every
       # event lands in ClickHouse with client="unknown".
-      SDK_API_KEYS_JSON: "${SDK_API_KEYS_JSON:-{}}"
+      # NOTE: do NOT add a `${VAR:-{}}` default — Compose's interpolation
+      # treats the first `}` as the close of `${...}`, then appends the
+      # trailing `}` as a literal, corrupting JSON values. Empty default is
+      # fine; the api-key-resolver handles an empty string gracefully.
+      SDK_API_KEYS_JSON: "${SDK_API_KEYS_JSON:-}"
     command: ["uvicorn", "ingestion_service.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    # Bind to the host so the Phase G agent (running in a Linux VM next to the
+    # Mac dev stack) can post uplink + long-poll without going through Caddy.
+    # Production deployments leave this off; agents reach ingestion via Caddy.
+    ports:
+      - "0.0.0.0:8001:8001"
     depends_on:
       valkey:
         condition: service_healthy
@@ -132,6 +146,10 @@ services:
       SDK_API_KEY: ${SDK_API_KEY:-local-dev-sdk-key}
       ALLOWED_ORIGINS: https://insights.${DOMAIN}
     command: ["uvicorn", "insights_api.main:app", "--host", "0.0.0.0", "--port", "8003"]
+    # Phase G local-dev — web-insights browser calls insights-api directly
+    # without going through Caddy. Production fronts this behind insights.${DOMAIN}.
+    ports:
+      - "127.0.0.1:8003:8003"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -241,9 +259,38 @@ services:
       - insights-api
       - ingestion-service
 
+  # ─── Phase G — eBPF agent (opt-in via --profile agent) ─────────────
+  # Privileged kernel observer that captures LLM traffic from libssl-backed
+  # processes on the same host. Won't start unless explicitly enabled:
+  #   docker compose --profile agent up -d inferspect-agent
+  # Requires the Docker Desktop Linux VM on macOS — won't run native on Mac.
+  inferspect-agent:
+    profiles: [agent]
+    build:
+      context: ../apps/inferspect-agent
+    image: inferspect/ebpf-agent:0.1.0
+    restart: unless-stopped
+    privileged: true
+    pid: host
+    network_mode: host
+    volumes:
+      - /sys/kernel/debug:/sys/kernel/debug
+      - /sys/fs/cgroup:/sys/fs/cgroup
+      - /lib/modules:/lib/modules:ro
+      - agent_state:/var/lib/inferspect
+    environment:
+      INFERSPECT_INGESTION_URL: ${INFERSPECT_INGESTION_URL:-http://localhost:8001}
+      INFERSPECT_API_KEY: ${SDK_API_KEY:?SDK_API_KEY required}
+      INFERSPECT_HOST_ID: ${INFERSPECT_HOST_ID:-}
+      INFERSPECT_AGENT_VERSION: "0.1.0"
+    depends_on:
+      ingestion-service:
+        condition: service_started
+
 volumes:
   postgres_data:
   valkey_data:
   clickhouse_data:
   caddy_data:
   caddy_config:
+  agent_state:

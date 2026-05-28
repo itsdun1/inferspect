@@ -52,6 +52,14 @@ class _BaseLog(BaseModel):
     service: str
     sdk_version: str | None = None
 
+    # Origin of this event. "sdk" = emitted by the in-process Python SDK;
+    # "ebpf-agent" = emitted by the host-level kernel observer. ClickHouse
+    # rows from both paths are deduped on request_id by ReplacingMergeTree.
+    source: Literal["sdk", "ebpf-agent"] = "sdk"
+    host_id: str | None = None
+    process_id: int | None = None
+    container_id: str | None = None
+
 
 class InferenceLog(_BaseLog):
     log_type: Literal[LogType.INFERENCE] = LogType.INFERENCE
@@ -91,6 +99,11 @@ class InferenceLog(_BaseLog):
     output_preview: str = ""
 
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    # 64-hex SHA256 over canonicalize(system + first_user). Stamped by the
+    # eBPF agent at capture time so the backend can later issue a kill
+    # against this fingerprint. SDK rows leave this empty.
+    fingerprint: str = ""
 
 
 class ToolExecutionLog(_BaseLog):

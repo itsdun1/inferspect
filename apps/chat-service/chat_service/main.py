@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -35,21 +36,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
     await bootstrap_admin(SessionLocal)
 
-    # SDK logger — optional; if ingestion isn't reachable the SDK buffers
-    # and drops gracefully.
+    # SDK logger — disabled in this build. Observability is provided by the
+    # external inferspect-agent (eBPF uprobes on libssl). chat-service emits
+    # no telemetry; the agent captures the same SSL_writes transparently.
+    # Re-enable by setting INFERSPECT_USE_SDK=1.
     sdk_logger = None
-    try:
-        from chatbot_sdk import InferenceLogger
+    if os.environ.get("INFERSPECT_USE_SDK") == "1":
+        try:
+            from chatbot_sdk import InferenceLogger
 
-        sdk_logger = InferenceLogger(
-            ingestion_url=settings.ingestion_url,
-            service=settings.service_name,
-            api_key=settings.sdk_api_key,
-        )
-        await sdk_logger.start()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("SDK init failed; running without inference logging: %s", exc)
-        sdk_logger = None
+            sdk_logger = InferenceLogger(
+                ingestion_url=settings.ingestion_url,
+                service=settings.service_name,
+                api_key=settings.sdk_api_key,
+            )
+            await sdk_logger.start()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("SDK init failed; running without inference logging: %s", exc)
+            sdk_logger = None
 
     # Single hub for chat-service ↔ SDK integration. Constructed ONCE at
     # boot. Holds the raw provider clients (instrumented at construction

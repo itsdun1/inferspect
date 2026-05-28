@@ -43,6 +43,24 @@ class Settings(BaseSettings):
     ingestion_url: str = "http://ingestion-service:8001/v1/logs"
     sdk_api_key: str | None = None
 
+    # Base URL of the ingestion service for control-plane calls (kill).
+    # Falls back to a sane derivation of ``ingestion_url`` when unset.
+    ingestion_control_base_url: str | None = None
+
+    @property
+    def ingestion_control_url(self) -> str:
+        if self.ingestion_control_base_url:
+            return self.ingestion_control_base_url.rstrip("/") + "/v1/control"
+        # ``ingestion_url`` looks like http://host/v1/logs — strip the /logs.
+        base = self.ingestion_url.rstrip("/")
+        if base.endswith("/v1/logs"):
+            base = base[: -len("/logs")]
+        elif base.endswith("/logs"):
+            base = base[: -len("/logs")]
+        else:
+            base = base + "/v1"
+        return base.rstrip("/") + "/control"
+
     # Comma-separated list of extra CORS origins (the dev ports are already allowed).
     allowed_origins: str = ""
 

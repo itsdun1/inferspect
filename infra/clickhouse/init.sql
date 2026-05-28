@@ -36,7 +36,17 @@ CREATE TABLE IF NOT EXISTS inference_logs (
     error_message           Nullable(String),
     input_preview           String,
     output_preview          String,
-    metadata                String DEFAULT '{}'    -- JSON as string for portability
+    metadata                String DEFAULT '{}',   -- JSON as string for portability
+    -- Origin of the event (sdk | ebpf-agent) and host context when emitted
+    -- by the kernel observer.
+    source                  LowCardinality(String) DEFAULT 'sdk',
+    host_id                 String DEFAULT '',
+    process_id              Nullable(UInt32),
+    container_id            String DEFAULT '',
+    -- 32-byte SHA256 of canonicalize(system + first_user). Stable across
+    -- turns of a conversation; primary kill key. Empty when not computed
+    -- (SDK rows leave this blank).
+    fingerprint             FixedString(64) DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(received_at)
 PARTITION BY toYYYYMM(started_at)
@@ -67,7 +77,11 @@ CREATE TABLE IF NOT EXISTS tool_executions (
     args_preview                    String,
     result_preview                  String,
     result_size_bytes               UInt32 DEFAULT 0,
-    metadata                        String DEFAULT '{}'
+    metadata                        String DEFAULT '{}',
+    source                          LowCardinality(String) DEFAULT 'sdk',
+    host_id                         String DEFAULT '',
+    process_id                      Nullable(UInt32),
+    container_id                    String DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(received_at)
 PARTITION BY toYYYYMM(started_at)
@@ -88,12 +102,40 @@ CREATE TABLE IF NOT EXISTS application_logs (
     trace_id                Nullable(UUID),
     span_id                 Nullable(String),
     message                 String,
-    attributes              String DEFAULT '{}'
+    attributes              String DEFAULT '{}',
+    source                  LowCardinality(String) DEFAULT 'sdk',
+    host_id                 String DEFAULT '',
+    process_id              Nullable(UInt32),
+    container_id            String DEFAULT ''
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(ts)
 ORDER BY (ts, service, level)
 TTL toDateTime(ts) + INTERVAL 30 DAY;
+
+-- ─────────────────────────────────────────────────────────────────────
+-- enforcement_events
+-- Audit log of every kill / block command the backend issued. One row per
+-- operator (or future intervention-engine) action. Independent of whether
+-- the kill actually matched a live request — the agent reports back via
+-- a follow-up event when it observes the matching SSL_write.
+-- ─────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS enforcement_events (
+    timestamp        DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
+    host_id          String,
+    fingerprint      FixedString(64),               -- hex of the 32-byte SHA256
+    command          LowCardinality(String),        -- 'block_fingerprint' (more later)
+    reason           String,
+    source           LowCardinality(String),        -- 'operator' | 'intervention-engine'
+    client           LowCardinality(String) DEFAULT '',
+    rule_id          String DEFAULT '',
+    operator_id      String DEFAULT '',
+    matched          UInt8 DEFAULT 0                -- 1 if the agent reported a match
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMMDD(timestamp)
+ORDER BY (client, host_id, timestamp)
+TTL toDateTime(timestamp) + INTERVAL 90 DAY;
 
 -- ─────────────────────────────────────────────────────────────────────
 -- Materialized views — pre-aggregated rollups for dashboards.
@@ -152,4 +194,13 @@ GROUP BY bucket, client, tool_name;
 -- DROP TABLE mv_inference_5m;
 -- DROP TABLE mv_tool_5m;
 -- (Re-run the CREATE MATERIALIZED VIEW statements above.)
+--
+-- Phase G additions:
+-- ALTER TABLE inference_logs  ADD COLUMN IF NOT EXISTS source       LowCardinality(String) DEFAULT 'sdk';
+-- ALTER TABLE inference_logs  ADD COLUMN IF NOT EXISTS host_id      String DEFAULT '';
+-- ALTER TABLE inference_logs  ADD COLUMN IF NOT EXISTS process_id   Nullable(UInt32);
+-- ALTER TABLE inference_logs  ADD COLUMN IF NOT EXISTS container_id String DEFAULT '';
+-- ALTER TABLE inference_logs  ADD COLUMN IF NOT EXISTS fingerprint  FixedString(64) DEFAULT '';
+-- (same source/host_id/process_id/container_id columns on tool_executions, application_logs)
+-- Plus the enforcement_events CREATE TABLE above.
 -- ─────────────────────────────────────────────────────────────────────

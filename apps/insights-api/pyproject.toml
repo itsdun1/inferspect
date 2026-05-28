@@ -14,6 +14,8 @@ dependencies = [
     "asyncpg>=0.29",
     "fastapi-users[sqlalchemy]>=13.0",
     "inferspect-sdk",
+    # Phase G — agents_service forwards operator kills to ingestion's /v1/control/kill.
+    "httpx>=0.27",
 ]
 
 [build-system]

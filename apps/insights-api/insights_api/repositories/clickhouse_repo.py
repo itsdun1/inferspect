@@ -231,7 +231,22 @@ async def session_inference_events(
     session_id: str,
     client: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Return inference rows for a session, cross-linked by fingerprint.
+
+    Phase G.2 — since the agent emits rows with NULL ``session_id`` and a
+    different ``conversation_id`` than chat-service, we widen the match:
+    any inference_logs row that shares a fingerprint with the session's
+    direct rows is included. Rows without a fingerprint (the default for
+    pre-agent SDK rows that don't compute one) are still matched by
+    session_id/conversation_id directly so we don't drop them.
+    """
     sql = f"""
+        WITH session_fingerprints AS (
+            SELECT DISTINCT fingerprint
+            FROM inference_logs
+            WHERE (session_id = {{id:UUID}} OR conversation_id = {{id:UUID}})
+              AND fingerprint != ''
+        )
         SELECT
             request_id,
             conversation_id,
@@ -251,9 +266,16 @@ async def session_inference_events(
             error_message,
             tool_calls_count,
             input_preview,
-            output_preview
+            output_preview,
+            source,
+            host_id,
+            fingerprint
         FROM inference_logs
-        WHERE (session_id = {{id:UUID}} OR conversation_id = {{id:UUID}}){_client_filter(client)}
+        WHERE (
+            session_id = {{id:UUID}}
+            OR conversation_id = {{id:UUID}}
+            OR (fingerprint != '' AND fingerprint IN (SELECT fingerprint FROM session_fingerprints))
+        ){_client_filter(client)}
         ORDER BY started_at ASC
     """
     params: dict[str, Any] = {"id": session_id}
@@ -389,6 +411,294 @@ async def anomaly_series(
     if client is not None:
         params["client"] = client
     return await _named_results(ch_client, sql, params)
+
+
+# ─── /agents ──────────────────────────────────────────────────────
+async def connected_agents(
+    ch_client: _AsyncCHClient,
+    *,
+    since: datetime,
+    client: str | None = None,
+) -> list[dict[str, Any]]:
+    """Distinct host_ids that emitted at least one ebpf-agent event in the window.
+
+    ClickHouse is the source of truth for who's been heartbeating recently —
+    cheaper than reaching across to ingestion's Valkey. The trade-off: a host
+    that's connected but hasn't observed traffic yet won't appear here. For
+    fleet visibility this is the right behavior — we surface hosts that are
+    actually doing observability work.
+    """
+    sql = f"""
+        SELECT
+            host_id,
+            max(received_at)              AS last_seen,
+            count()                       AS event_count,
+            any(container_id)             AS container_id,
+            uniqExact(process_id)         AS distinct_pids,
+            uniqExact(provider)           AS distinct_providers
+        FROM inference_logs
+        WHERE received_at >= {{since:DateTime64(3)}}
+          AND source = 'ebpf-agent'
+          AND host_id != ''{_client_filter(client)}
+        GROUP BY host_id
+        ORDER BY last_seen DESC
+    """
+    params: dict[str, Any] = {"since": since}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
+
+
+# ─── /agents/{host_id}/fingerprints ───────────────────────────────
+async def recent_fingerprints_for_host(
+    ch_client: _AsyncCHClient,
+    *,
+    host_id: str,
+    since: datetime,
+    limit: int = 20,
+    client: str | None = None,
+) -> list[dict[str, Any]]:
+    """Distinct fingerprints captured on this host in the window, with stats.
+
+    Used by the operator-console agent page so an operator can browse what
+    conversations a given host has observed and kill any of them. Each row:
+    fingerprint (64-hex), first_seen, last_seen, request_count, sample preview
+    of the first user-message-shaped wire body, distinct process_ids.
+    """
+    sql = f"""
+        SELECT
+            fingerprint,
+            min(received_at)                AS first_seen,
+            max(received_at)                AS last_seen,
+            count()                         AS request_count,
+            any(input_preview)              AS sample_preview,
+            any(model)                      AS model,
+            any(provider)                   AS provider,
+            uniqExact(process_id)           AS distinct_pids
+        FROM inference_logs
+        WHERE host_id = {{host_id:String}}
+          AND source = 'ebpf-agent'
+          AND fingerprint != ''
+          AND received_at >= {{since:DateTime64(3)}}{_client_filter(client)}
+        GROUP BY fingerprint
+        ORDER BY last_seen DESC
+        LIMIT {{limit:UInt32}}
+    """
+    params: dict[str, Any] = {"host_id": host_id, "since": since, "limit": limit}
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
+
+
+# ─── /enforcement-events ──────────────────────────────────────────
+async def enforcement_events(
+    ch_client: _AsyncCHClient,
+    *,
+    since: datetime,
+    host_id: str | None = None,
+    limit: int = 100,
+    client: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return enforcement audit rows with ``matched`` computed dynamically.
+
+    Phase G.2 — the stored ``matched`` column is never flipped (the agent
+    writes its kill_applied confirmation into ``inference_logs``, not back
+    into enforcement_events). Compute it at query time: a kill is
+    considered matched if any ``kill_applied`` event landed on the same
+    host within 5 minutes after the kill was issued. ``host_id``
+    correlation is sufficient — fingerprint correlation would also work
+    but the agent only fires kill_applied for kills it received, so
+    host+time is unambiguous in practice.
+    """
+    host_filter = " AND ee.host_id = {host_id:String}" if host_id is not None else ""
+    client_clause = " AND ee.client = {client:String}" if client is not None else ""
+    # ClickHouse 24.8 rejects correlated subqueries that reference
+    # non-constant columns from the outer scope (only constants/CTEs
+    # allowed). Rewrite the matched-flag as a LEFT JOIN against the kill
+    # confirmation events, time-bucketed against each kill.
+    sql = f"""
+        SELECT
+            ee.timestamp        AS timestamp,
+            ee.host_id          AS host_id,
+            ee.fingerprint      AS fingerprint,
+            ee.command          AS command,
+            ee.reason           AS reason,
+            ee.source           AS source,
+            ee.client           AS client,
+            ee.rule_id          AS rule_id,
+            ee.operator_id      AS operator_id,
+            toUInt8(max(if(
+                kill.host_id != ''
+                AND kill.received_at >= ee.timestamp
+                AND kill.received_at <= ee.timestamp + INTERVAL 5 MINUTE,
+                1, 0
+            ))) AS matched
+        FROM enforcement_events ee
+        LEFT JOIN (
+            SELECT host_id, received_at
+            FROM inference_logs
+            WHERE JSONExtractString(metadata, 'event') = 'kill_applied'
+              AND received_at >= {{since:DateTime64(3)}}
+              AND received_at <= now() + INTERVAL 1 HOUR
+        ) kill ON kill.host_id = ee.host_id
+        WHERE ee.timestamp >= {{since:DateTime64(3)}}{host_filter}{client_clause}
+        GROUP BY
+            ee.timestamp, ee.host_id, ee.fingerprint, ee.command, ee.reason,
+            ee.source, ee.client, ee.rule_id, ee.operator_id
+        ORDER BY ee.timestamp DESC
+        LIMIT {{limit:UInt32}}
+    """
+    params: dict[str, Any] = {"since": since, "limit": limit}
+    if host_id is not None:
+        params["host_id"] = host_id
+    if client is not None:
+        params["client"] = client
+    return await _named_results(ch_client, sql, params)
+
+
+async def session_fingerprint(
+    ch_client: _AsyncCHClient,
+    *,
+    session_id: str,
+    client: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the host_id + fingerprint + input_preview for the most recent
+    ebpf-agent row in this session.
+
+    Used by ``agents_service.kill_session`` — it needs:
+      * ``host_id`` to route the kill command,
+      * ``fingerprint`` for the audit log,
+      * ``input_preview`` so Phase G.4 can extract the anchor bytes + the
+        rolling-hash chain for the agent's Layer 2 verifier.
+
+    Just returns the single most recent matching row (no GROUP BY, which
+    triggered ClickHouse 24.8's stricter check for column references in
+    both WHERE and aggregate SELECT).
+    """
+    # The agent emits one row per HTTP request *and* a separate row for the
+    # response stitch; only the request row has the wire body in
+    # ``input_preview``. Filter on ``length(input_preview) > 0`` so we land
+    # on a row that carries the JSON we need to extract the anchor from.
+    sql = f"""
+        SELECT
+            host_id,
+            fingerprint,
+            conversation_id,
+            received_at AS last_seen,
+            input_preview
+        FROM inference_logs
+        WHERE (session_id = {{id:UUID}} OR conversation_id = {{id:UUID}})
+          AND source = 'ebpf-agent'
+          AND fingerprint != ''
+          AND length(input_preview) > 0{_client_filter(client)}
+        ORDER BY received_at DESC
+        LIMIT 1
+    """
+    params: dict[str, Any] = {"id": session_id}
+    if client is not None:
+        params["client"] = client
+    rows = await _named_results(ch_client, sql, params)
+    if rows:
+        return rows[0]
+
+    # Fallback path. When the SDK is disabled in the customer's app
+    # (Phase G's whole point — daemon-only observation), agent rows DON'T
+    # share chat-service's conversation_id (they carry their own
+    # tracker-minted AgentID). The direct match above will miss every
+    # time. Until we cross-link by fingerprint via chat-service's
+    # postgres, fall back to "the most recent ebpf-agent capture in the
+    # last 5 minutes". For single-host demos this is exact; for
+    # multi-tenant we'll need the postgres cross-link.
+    fallback_sql = f"""
+        SELECT
+            host_id,
+            fingerprint,
+            conversation_id,
+            received_at AS last_seen,
+            input_preview
+        FROM inference_logs
+        WHERE source = 'ebpf-agent'
+          AND fingerprint != ''
+          AND length(input_preview) > 0
+          AND received_at >= now() - INTERVAL 5 MINUTE
+          {_client_filter(client)}
+        ORDER BY received_at DESC
+        LIMIT 1
+    """
+    # Use a fresh params dict — the first query used {id}, but the fallback
+    # only references {client} (when present). Passing extra ``id`` would
+    # confuse the parameterized-query type checker.
+    fallback_params: dict[str, Any] = {}
+    if client is not None:
+        fallback_params["client"] = client
+    fallback_rows = await _named_results(ch_client, fallback_sql, fallback_params)
+    return fallback_rows[0] if fallback_rows else None
+
+
+async def preview_for_fingerprint(
+    ch_client: _AsyncCHClient,
+    *,
+    host_id: str,
+    fingerprint: str,
+    client: str | None = None,
+) -> str | None:
+    """Latest non-empty ``input_preview`` for a (host_id, fingerprint) pair.
+
+    Used by the /agents page Kill button so it can go through the Phase G.4
+    anchor flow instead of the older fingerprint-pattern path — the operator
+    has already picked a conversation from the agent's own view, no need to
+    cross-reference chat-service.
+    """
+    sql = f"""
+        SELECT input_preview
+        FROM inference_logs
+        WHERE host_id = {{host_id:String}}
+          AND fingerprint = {{fingerprint:String}}
+          AND source = 'ebpf-agent'
+          AND length(input_preview) > 0{_client_filter(client)}
+        ORDER BY received_at DESC
+        LIMIT 1
+    """
+    params: dict[str, Any] = {"host_id": host_id, "fingerprint": fingerprint}
+    if client is not None:
+        params["client"] = client
+    rows = await _named_results(ch_client, sql, params)
+    if not rows:
+        return None
+    raw = rows[0].get("input_preview") or ""
+    return raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+
+
+async def record_enforcement_event(
+    ch_client: _AsyncCHClient,
+    *,
+    host_id: str,
+    fingerprint: str,
+    command: str,
+    reason: str,
+    source: str,
+    client_name: str,
+    operator_id: str = "",
+    rule_id: str = "",
+) -> None:
+    """Append a row to ``enforcement_events``. Fire-and-forget audit log."""
+    # clickhouse-connect's async client also has ``insert()`` like the
+    # consumer's writer. Same shape.
+    await ch_client.insert(
+        "enforcement_events",
+        [[host_id, fingerprint, command, reason, source, client_name, rule_id, operator_id, 0]],
+        column_names=[
+            "host_id",
+            "fingerprint",
+            "command",
+            "reason",
+            "source",
+            "client",
+            "rule_id",
+            "operator_id",
+            "matched",
+        ],
+    )
 
 
 # ─── /insights/tools ──────────────────────────────────────────────

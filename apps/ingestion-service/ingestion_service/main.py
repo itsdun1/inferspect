@@ -10,10 +10,12 @@ from fastapi import FastAPI
 from redis.asyncio import Redis
 
 from ingestion_service.config import settings
-from ingestion_service.controllers import health_controller, ingest_controller
+from ingestion_service.controllers import control_controller, health_controller, ingest_controller
+from ingestion_service.repositories.control_queue import ControlQueue
 from ingestion_service.repositories.idempotency_repository import IdempotencyRepository
 from ingestion_service.repositories.valkey_publisher import ValkeyPublisher
 from ingestion_service.services.auth_service import ApiKeyResolver
+from ingestion_service.services.control_service import ControlService
 from ingestion_service.services.ingest_service import IngestService
 from ingestion_service.services.pii_service import PIIService
 
@@ -38,6 +40,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     ingest_service = IngestService(publisher=publisher, idempotency=idempotency, pii=pii)
     api_key_resolver = ApiKeyResolver(settings.sdk_api_keys_json)
+    control_queue = ControlQueue(client)
+    control_service = ControlService(queue=control_queue)
 
     app.state.client = client
     app.state.publisher = publisher
@@ -45,6 +49,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pii = pii
     app.state.ingest_service = ingest_service
     app.state.api_key_resolver = api_key_resolver
+    app.state.control_queue = control_queue
+    app.state.control_service = control_service
 
     log.info("ingestion-service startup complete")
     try:
@@ -62,6 +68,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(health_controller.router)
     app.include_router(ingest_controller.router)
+    app.include_router(control_controller.router)
     return app
 
 

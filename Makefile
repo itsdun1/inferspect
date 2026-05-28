@@ -74,3 +74,32 @@ ch: ## clickhouse-client shell
 .PHONY: valkey-cli
 valkey-cli: ## valkey-cli shell
 	$(COMPOSE) exec valkey valkey-cli
+
+# ─── Phase G — eBPF agent ─────────────────────────────────────────────
+COMPOSE_PROD := docker compose -f infra/docker-compose.prod.yml --env-file .env
+
+.PHONY: agent-build
+agent-build: ## Build the inferspect-agent Docker image
+	$(COMPOSE_PROD) --profile agent build inferspect-agent
+
+.PHONY: agent-up
+agent-up: ## Start the agent alongside the prod stack (Linux / Docker Desktop)
+	$(COMPOSE_PROD) --profile agent up -d inferspect-agent
+	@echo "Agent logs: docker logs -f inferspect-agent"
+
+.PHONY: agent-down
+agent-down: ## Stop the agent (leaves the rest of the stack running)
+	$(COMPOSE_PROD) --profile agent stop inferspect-agent
+	$(COMPOSE_PROD) --profile agent rm -f inferspect-agent
+
+.PHONY: agent-logs
+agent-logs: ## Tail the agent logs
+	docker logs -f inferspect-agent
+
+.PHONY: agent-demo
+agent-demo: ## End-to-end: prod stack + agent + a smoke chat (manual kill from /agents UI)
+	$(COMPOSE_PROD) up -d
+	$(COMPOSE_PROD) --profile agent up -d inferspect-agent
+	@echo ""
+	@echo "Stack + agent are running. Open https://chat.$$DOMAIN and start a conversation."
+	@echo "Then https://insights.$$DOMAIN/agents to see the host + issue a kill."
