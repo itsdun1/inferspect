@@ -356,7 +356,7 @@ func main() {
 			}
 			requests := reasm.Feed(ev.PID, ev.SSLCtx, ev.Payload)
 			for _, req := range requests {
-				handleRequest(req, hostInfo, policyStore, uplinkT, blockedSSL, store, tracker)
+				handleRequest(req, hostInfo, policyStore, uplinkT, blockedSSL, store, tracker, anchorStore)
 			}
 		case ringbuf.EvtSSLRead:
 			if len(ev.Payload) == 0 {
@@ -381,6 +381,7 @@ func handleRequest(
 	blockedSSL *ebpf.Map,
 	rs *requestStore,
 	tracker *fingerprint.Tracker,
+	anchorStore *policy.AnchorStore,
 ) {
 	provider := llm.IdentifyByHost(req.Host)
 	if provider == llm.ProviderUnknown || len(req.Body) == 0 {
@@ -453,6 +454,29 @@ func handleRequest(
 		sslCtx:         req.SSLCtx,
 		lastBody:       bodyCopy,
 	})
+
+	// Phase G.4 Layer 2 — user-space substring verifier. The kernel only
+	// scans the first SCAN_WINDOW (512) bytes; long system prompts or
+	// deep conversation chains push the killed text past that boundary.
+	// We get the FULL reassembled body here, so a Go-side bytes.Index
+	// finds the anchor regardless of position. On hit, we pre-arm the
+	// kernel blocked_ssl_contexts map for this connection so the next
+	// outbound SSL_write on the same SSL_CTX is corrupted in-kernel.
+	// Trade-off: the current turn isn't blocked (its SSL_write already
+	// fired before we got here); the NEXT one is. For "kill in-flight
+	// hallucination", that's acceptable — typical streamed responses
+	// take seconds, the next turn fails immediately after.
+	if anchorStore != nil && blockedSSL != nil {
+		if slot, matched, cmdID := anchorStore.MatchBody(req.Body); slot >= 0 {
+			log.Printf("layer2: anchor match cmd=%s slot=%d anchor=%dB body=%dB — pre-arming SSL_ctx=%x",
+				cmdID, slot, len(matched), len(req.Body), req.SSLCtx)
+			key := req.SSLCtx
+			val := uint8(1)
+			if err := blockedSSL.Update(&key, &val, ebpf.UpdateAny); err != nil {
+				log.Printf("layer2: pre-arm failed pid=%d ssl=%x: %v", req.PID, req.SSLCtx, err)
+			}
+		}
+	}
 
 	// Build a synthetic InferenceLog. We don't have the response yet — the
 	// response-side handler emits a follow-up event when SSL_read produces a

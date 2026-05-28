@@ -13,6 +13,7 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -21,6 +22,8 @@ import (
 
 	"github.com/cilium/ebpf"
 )
+
+var _bytesIndex = bytes.Index
 
 // Mirrors of the BPF constants in bpf/ssl_uprobe.c. Keep in lockstep.
 const (
@@ -231,6 +234,41 @@ func (s *AnchorStore) RecordKill(buffer []byte, kernelSlot int) (matchedSlot int
 	// observed buffer.
 	s.slots[matched].confirmed++
 	return matched, true
+}
+
+// MatchBody is the Layer-2 user-space substring scan. Walks the armed
+// anchors and returns the first slot whose anchor bytes appear anywhere
+// in ``body``. Returns slot index (or -1), the matching anchor bytes,
+// and the slot's commandID. Used by the request-side handler to catch
+// anchors that the kernel scan missed because the user message landed
+// past the kernel SCAN_WINDOW (~512 B) — long system prompts or deep
+// conversation chains push the content past the kernel's reach. The
+// user-space scan sees the whole assembled HTTP body, so size doesn't
+// matter.
+func (s *AnchorStore) MatchBody(body []byte) (slot int, anchor []byte, cmdID string) {
+	if len(body) == 0 {
+		return -1, nil, ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.slots {
+		if !s.slots[i].armed || len(s.slots[i].anchor) == 0 {
+			continue
+		}
+		if bytesIndex(body, s.slots[i].anchor) >= 0 {
+			anchorCopy := append([]byte(nil), s.slots[i].anchor...)
+			return i, anchorCopy, s.slots[i].commandID
+		}
+	}
+	return -1, nil, ""
+}
+
+// bytesIndex is a thin wrapper so we can swap in something fancier (e.g.
+// Boyer-Moore) without touching callers. The Go stdlib's bytes.Index is
+// already Rabin-Karp / SIMD-optimized on common architectures; this is
+// fast enough for the per-request hot path (one call per captured body).
+func bytesIndex(haystack, needle []byte) int {
+	return _bytesIndex(haystack, needle)
 }
 
 // Snapshot returns a copy of the current per-slot stats.
