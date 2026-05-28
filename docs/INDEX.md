@@ -11,6 +11,10 @@ The documentation hierarchy for the Ollive platform. Start at the README, drop i
 
 - [PLAN](./PLAN.md) — the design document: what was built and why, tech stack rationale, log schemas, controller/service/repository pattern, service layout, deployment phases.
 
+## Research
+
+- [research/agents-of-chaos.md](./research/agents-of-chaos.md) — primer on the four-layer LLM agent attack taxonomy (input / tool / memory / output). Backs the Phase G runtime-defense premise: why traditional prompt-injection benchmarks miss 30–60% of production failure modes and how Ollive's eBPF agent maps onto each layer.
+
 ## Historical reference
 
 - [`../chatbot.txt`](../chatbot.txt) — the original brief that prompted the initial design. Kept in the repo for historical reference; not load-bearing for current development.

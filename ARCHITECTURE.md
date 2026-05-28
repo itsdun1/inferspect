@@ -137,6 +137,108 @@ LangChain's per-provider chat-model packages each wrap the **official** provider
 
 **Network isolation.** The dev Compose binds ports to `127.0.0.1` only. Production Compose exposes only `:80` and `:443` through Caddy; everything else stays on the Docker network.
 
+## eBPF agent — kernel↔userspace data plane
+
+Phase G ships a privileged daemon (`apps/inferspect-agent`) that captures LLM API traffic at libssl-level on the customer host and accepts kill commands from our backend. This section covers the runtime mechanism — how the userspace Go agent and the kernel BPF program actually talk to each other.
+
+### The two sides + the channels
+
+The "wire" between userspace and kernel is a **set of BPF maps**. Maps are kernel-owned data structures that both sides can read/write; the kernel side does it via `bpf_map_lookup_elem` / `bpf_map_update_elem`, userspace does it via `mp.Lookup()` / `mp.Update()` on the `*ebpf.Map` handle. Think of maps as shared global variables that the verifier guards.
+
+| Map | Type | Who writes | Who reads | Purpose |
+| --- | --- | --- | --- | --- |
+| `events` | RINGBUF | kernel | userspace | streams captured plaintext + kill notifications |
+| `blocked_anchors` | ARRAY[8] of `{u32 len; u8 bytes[128]}` | userspace | kernel | content patterns the kernel scans for |
+| `blocked_ssl_contexts` | HASH | userspace | kernel | "SSL_CTX X is blocked" set |
+| `scan_scratch` | PERCPU_ARRAY[1] of 512 bytes | kernel only | (none) | per-CPU buffer to stage a copy of the SSL_write payload |
+| `ssl_read_args` | HASH keyed by pid_tgid | kernel | kernel | stash entry args of SSL_read so the retprobe knows them |
+
+### Direction 1 — kernel → userspace
+
+```c
+SEC("uprobe/SSL_write")
+int BPF_KPROBE(uprobe_SSL_write, void *ssl, const void *buf, int num) {
+    if (enforce_if_blocked((__u64)ssl, buf, (__u64)num)) {
+        return 0;   // kill applied, skip the capture event
+    }
+    emit_event(EVT_SSL_WRITE, (__u64)ssl, buf, (__u64)num);
+    return 0;
+}
+```
+
+On every `SSL_write` call by any process on the host, the kernel suspends the thread and runs our BPF program. `emit_event` reserves space in the ringbuf, copies up to N bytes of `buf` via `bpf_probe_read_user`, and submits. Kernel returns; libssl proceeds with the untouched write.
+
+Userspace (`internal/ringbuf/reader.go`) sits in `rd.Read()` blocked on the ringbuf's epoll fd. When a record arrives, the reader hands the bytes to a callback in `cmd/agent/main.go` which:
+
+1. Parses the binary header (PID, SSL_CTX, event type, length).
+2. Reassembles HTTP fragments by `(pid, ssl_ctx)` via the `httpreasm` package.
+3. Once a complete request body is stitched, computes the prefix fingerprint, calls `tracker.IdentifyOrCreate(...)` to mint or extend a `Conversation` (this is where the raw `FirstUserText` gets stored — host-local memory, never serialized).
+4. Passes `input_preview` and `output_preview` through `redact.Text` for PII scrubbing.
+5. Enqueues the event for the batched uplink to `/v1/logs`.
+
+The kernel never knows about messages, fingerprints, or conversations. It just hands raw bytes up.
+
+### Direction 2 — userspace → kernel
+
+The downlink (`internal/downlink/poller.go`) holds one long-poll GET to `/v1/control/poll` open. When the backend's Valkey outbox gets an entry, the GET wakes up with a JSON command. The handler in `cmd/agent/main.go`:
+
+```go
+case "block_fingerprint":
+    policyStore.Block(cmd.Fingerprint, cmd.TTLSeconds)
+    // Pre-arm sockets we've already observed
+    for _, ps := range tracker.SocketsForFingerprint(cmd.Fingerprint) {
+        preArmKernel(uint32(ps[0]), ps[1])
+    }
+    // Build kernel content-anchor from host-local tracker text
+    if firstUser := tracker.FirstUserTextForFingerprint(cmd.Fingerprint); firstUser != "" {
+        anchorBytes := buildLocalAnchor(firstUser)
+        anchorStore.Arm(cmd.CommandID, anchorBytes, [32]byte{})
+    }
+```
+
+`AnchorStore.Arm` marshals the anchor into 132 bytes (`{u32 len; u8 bytes[128]}`) and calls `mp.Update()` which issues `BPF_MAP_UPDATE_ELEM`. The kernel writes it into the array slot. From that moment on, the kernel program reading `blocked_anchors` sees the new entry.
+
+The reason the marshaled payload must be exactly 132 bytes: the BPF verifier knows the map's `value_size` from the program's type definition. Size mismatches between Go (`anchorMax`) and C (`ANCHOR_MAX`) cause `[]uint8 doesn't marshal to N bytes` errors at update time.
+
+### The kill in-flight — synchronous corruption
+
+When the next chat call enters libssl, the kernel suspends and runs the uprobe:
+
+```c
+__u8 *blocked = bpf_map_lookup_elem(&blocked_ssl_contexts, &ssl_ctx);
+if (blocked && *blocked != 0) goto kill;
+
+matched_slot = scan_buffer_for_anchor(buf, num);
+if (matched_slot < 0) return 0;
+
+kill:
+    __u8 zero = 0;
+    bpf_probe_write_user((void *)buf, &zero, 1);   // corrupt first byte
+    // emit EVT_SSL_KILL for userspace accounting
+```
+
+`bpf_probe_read_user` and `bpf_probe_write_user` are how BPF crosses the kernel↔userspace memory boundary — the buffer lives in the calling process's userspace memory, BPF can read it with verifier-checked bounds and write into it with `CAP_SYS_ADMIN`.
+
+The scan happens **synchronously inside the uprobe.** libssl's caller is blocked. When BPF returns, control goes back to `SSL_write`, which now reads the corrupted buffer, encrypts it as if it were valid JSON, ships it to OpenAI. OpenAI sees `{"\0essages":...` → returns HTTP 400 → chat-service surfaces 500.
+
+### Loading + attaching at boot
+
+`internal/kernel/loader.go`:
+
+1. Reads the compiled `ssl_uprobe.o` ELF (clang -target bpf output).
+2. Hands it to `ebpf.LoadCollectionSpec()` which parses maps + programs.
+3. `coll, err := ebpf.NewCollection(spec)` — kernel verifier runs here. Verifier errors ("R2 min value is negative", "exceeded max instructions") surface from this call.
+4. Opens uprobes against the libssl symbol on the host: `/usr/lib/aarch64-linux-gnu/libssl.so.3` on arm64, x86_64 path on Intel.
+5. Hands out the map file descriptors as `*ebpf.Map` handles. `blockedAnchorsMap := coll.Maps["blocked_anchors"]` becomes the userspace-side write handle.
+
+After step 5, the kernel side is live — any process on the host calling `SSL_write` triggers the uprobe.
+
+### PII boundary — what stays on the host
+
+The agent applies a regex redactor (`internal/redact/redact.go` — email, phone, credit card, SSN, IPv4) to `input_preview` and `output_preview` *before* the uplink HTTP POST to ingestion-service. Raw PII never crosses the network into our backend storage.
+
+The kill capability is preserved because the *anchor materials* — the raw user-message bytes the kernel needs to scan for — live in the agent's `tracker.Conversation.FirstUserText` field, in process memory only, never serialized. When the backend issues `block_fingerprint`, it sends only the fingerprint; the agent looks up its own memory and rebuilds the anchor locally. The backend never sees the raw text. See `docs/PLAN.md` Phase G section for the design trade-off log.
+
 ## What's intentionally simple
 
 - **No OpenTelemetry tracing.** Useful for cross-service correlation in larger deployments. We track `request_id` end-to-end, which buys most of the value at far less complexity.

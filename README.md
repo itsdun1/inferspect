@@ -1,6 +1,8 @@
-# Ollive — LLM observability platform for AI vendors
+# Ollive — LLM observability + runtime defense for AI vendors
 
-Ollive is an end-to-end observability platform for teams shipping LLM-powered products. It ingests inference, tool-execution, and application logs from any service running our lightweight Python SDK, stores them in a workload-appropriate split of Postgres (OLTP) and ClickHouse (OLAP), and exposes the resulting telemetry through a typed Insights API and an in-product operator console. A reference chatbot ships alongside the platform so teams can see realistic traffic flowing through every layer the day they install it.
+Ollive is an end-to-end platform for teams shipping LLM-powered products. It ingests inference, tool-execution, and application logs from any service running our lightweight Python SDK, stores them in a workload-appropriate split of Postgres (OLTP) and ClickHouse (OLAP), and exposes the resulting telemetry through a typed Insights API and an in-product operator console. A reference chatbot ships alongside the platform so teams can see realistic traffic flowing through every layer the day they install it.
+
+Phase G ships a privileged **eBPF agent** that captures LLM API traffic at libssl-level *without any customer code change* and accepts content-anchor kill commands from the backend — runtime defense, not just telemetry. Operators can stop a hallucinating conversation in flight via `/agents` in the operator console; the kill propagates from operator click to corrupted SSL_write in ~50 ms. PII is redacted on the customer host before any byte crosses the network. See `apps/inferspect-agent/`, `docs/PLAN.md` (Phase G section), and `docs/research/agents-of-chaos.md` for the motivation, architecture, and security-research context.
 
 ## Quick start
 
