@@ -5,10 +5,12 @@ import Link from "next/link";
 import {
   ApiError,
   getAgents,
+  getEnforcementEvents,
   getHostFingerprints,
   killOnHost,
   unblockOnHost,
   type AgentRow,
+  type EnforcementEvent,
   type HostFingerprint,
 } from "../../lib/api";
 
@@ -179,17 +181,35 @@ function AgentRowDisplay({
 
 function FingerprintRow({ hostId }: { hostId: string }) {
   const [fps, setFps] = useState<HostFingerprint[]>([]);
+  // Map fingerprint → most-recent enforcement event for this host. Used to
+  // badge each row (block_fingerprint vs block_anchor, matched vs armed).
+  const [enforcement, setEnforcement] = useState<Map<string, EnforcementEvent>>(
+    new Map(),
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await getHostFingerprints(hostId, { windowHours: 1, limit: 50 });
-      setFps(data.fingerprints ?? []);
+      const [fpData, enforceData] = await Promise.all([
+        getHostFingerprints(hostId, { windowHours: 1, limit: 50 }),
+        getEnforcementEvents({ hostId, windowHours: 1, limit: 200 }),
+      ]);
+      setFps(fpData.fingerprints ?? []);
+      // Keep only the most recent event per fingerprint (events come
+      // sorted newest-first from the API).
+      const byFp = new Map<string, EnforcementEvent>();
+      for (const ev of enforceData.events ?? []) {
+        if (!byFp.has(ev.fingerprint)) {
+          byFp.set(ev.fingerprint, ev);
+        }
+      }
+      setEnforcement(byFp);
       setError(null);
     } catch (err) {
       setFps([]);
+      setEnforcement(new Map());
       setError(err instanceof ApiError ? `HTTP ${err.status}` : "Failed to load");
     } finally {
       setLoading(false);
@@ -228,6 +248,7 @@ function FingerprintRow({ hostId }: { hostId: string }) {
                   key={fp.fingerprint}
                   hostId={hostId}
                   fp={fp}
+                  enforcement={enforcement.get(fp.fingerprint)}
                   onKilled={load}
                 />
               ))}
@@ -242,10 +263,12 @@ function FingerprintRow({ hostId }: { hostId: string }) {
 function KillableFingerprint({
   hostId,
   fp,
+  enforcement,
   onKilled,
 }: {
   hostId: string;
   fp: HostFingerprint;
+  enforcement?: EnforcementEvent;
   onKilled: () => void;
 }) {
   const [state, setState] = useState<
@@ -318,40 +341,61 @@ function KillableFingerprint({
         {fp.preview || "—"}
       </td>
       <td className="px-2 py-1 text-right">
-        {state.status === "killed" ? (
-          <span className="inline-flex items-center gap-2">
-            <span className="text-xs text-emerald-700">Killed</span>
-            <button
-              type="button"
-              onClick={onUnblock}
-              className="rounded-md bg-gray-600 px-2 py-0.5 text-xs font-medium text-white shadow-sm hover:bg-gray-700"
-            >
-              Unblock
-            </button>
-          </span>
-        ) : state.status === "unblocked" ? (
-          <span className="text-xs text-gray-600">Unblocked</span>
-        ) : (
-          <span className="inline-flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onKill}
-              disabled={state.status === "loading"}
-              className="rounded-md bg-red-600 px-2 py-0.5 text-xs font-medium text-white shadow-sm hover:bg-red-700 disabled:opacity-50"
-            >
-              {state.status === "loading" ? "…" : "Kill"}
-            </button>
-            <button
-              type="button"
-              onClick={onUnblock}
-              disabled={state.status === "loading"}
-              className="rounded-md bg-gray-200 px-2 py-0.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-300 disabled:opacity-50"
-              title="Disarm any active block for this fingerprint"
-            >
-              Unblock
-            </button>
-          </span>
-        )}
+        <div className="flex items-center justify-end gap-2">
+          {enforcement ? (
+            enforcement.matched === 1 ? (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700"
+                title={`kill confirmed (${enforcement.command} • ${new Date(enforcement.timestamp).toLocaleString()})`}
+              >
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                blocked ✓
+              </span>
+            ) : (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700"
+                title={`armed but no matching traffic yet (${enforcement.command} • ${new Date(enforcement.timestamp).toLocaleString()})`}
+              >
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
+                armed
+              </span>
+            )
+          ) : null}
+          {state.status === "killed" ? (
+            <>
+              <span className="text-xs text-emerald-700">Killed</span>
+              <button
+                type="button"
+                onClick={onUnblock}
+                className="rounded-md bg-gray-600 px-2 py-0.5 text-xs font-medium text-white shadow-sm hover:bg-gray-700"
+              >
+                Unblock
+              </button>
+            </>
+          ) : state.status === "unblocked" ? (
+            <span className="text-xs text-gray-600">Unblocked</span>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={onKill}
+                disabled={state.status === "loading"}
+                className="rounded-md bg-red-600 px-2 py-0.5 text-xs font-medium text-white shadow-sm hover:bg-red-700 disabled:opacity-50"
+              >
+                {state.status === "loading" ? "…" : "Kill"}
+              </button>
+              <button
+                type="button"
+                onClick={onUnblock}
+                disabled={state.status === "loading"}
+                className="rounded-md bg-gray-200 px-2 py-0.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-300 disabled:opacity-50"
+                title="Disarm any active block for this fingerprint"
+              >
+                Unblock
+              </button>
+            </>
+          )}
+        </div>
         {state.status === "error" ? (
           <p className="mt-0.5 text-[10px] text-red-700">{state.message}</p>
         ) : null}
