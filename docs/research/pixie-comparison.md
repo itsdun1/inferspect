@@ -230,7 +230,54 @@ Pixie is a *general-purpose, multi-runtime, multi-protocol* observability engine
 
 The lesson for our roadmap: when we add BoringSSL/Go/Node coverage (Phase G.5), we inherit Pixie's hard problems — the FD/offset tables and the Node TLSWrap dance are unavoidable there. Their code is the reference implementation to study before we write ours.
 
-## 9. Source map for reviewers
+## 9. Build-vs-fork: should we extend Pixie instead of maintaining our own agent?
+
+A reasonable question given how much capture machinery Pixie already has: rather than grow our own agent, fork Pixie and add the conversation-identity, PII, and kill features on top. Short answer — **technically possible, but the wrong trade for this product.** The detail:
+
+### What would port over cleanly
+
+All the *user-space* logic sits on top of capture and would drop onto Pixie without much friction:
+
+- **Conversation identity** (content-prefix fingerprint + rolling-hash tracker) — user-space, drop-in.
+- **On-host PII redaction** — user-space, drop-in.
+- **Backend control plane** (long-poll downlink, anchor table) — user-space, drop-in.
+
+And Pixie's capture is genuinely broader than ours (more runtimes, more protocols), so for the *watching* half, extending it is a real head start.
+
+### What fights you — the enforcement half
+
+The entire product thesis is **modifying** traffic (`bpf_probe_write_user` to kill a request). Pixie is architecturally an observer:
+
+- Its probes are built around read-only capture + FD/connection correlation; every design decision optimizes for "trace everything safely without touching it."
+- A kill means injecting `bpf_probe_write_user` (requires `CAP_SYS_ADMIN`, treated as dangerous) into BPF code that was never meant to write. Upstream Pixie would never accept that patch — so it lives on a **permanent private fork**.
+- A permanent fork defeats the main reason to fork: you stop getting free upstream maintenance, because the critical feature can never merge back. You now maintain a heavily-diverged copy of a large C++ system indefinitely.
+
+### Licensing
+
+Pixie's BPF code is **GPL-2.0** (see the file headers); our agent is Apache / dual-BSD-GPL.
+
+- **Forking Pixie** → the derivative is bound by GPL, which may matter to legal/customers for a commercial AI-liability product.
+- **Copying snippets** into our repo carries the same derivative-work obligation. *Reading* their code to learn a technique is fine; *pasting* it is not. This is the specific constraint for Phase G.5 (BoringSSL/Go/Node): study the offset-table approach, reimplement clean-room — do not copy.
+
+### Size mismatch
+
+Pixie is not just the BPF tracer. Running it pulls in Stirling (C++ collector) + PEM + Vizier + the PxL query engine + the Pixie cloud/UI deployment model. Our agent is ~400 lines of BPF plus a focused Go binary that long-polls the existing backend. Forking Pixie to ship an LLM-kill daemon is buying a freight train to deliver one parcel.
+
+### When extending Pixie *would* make sense
+
+- If the roadmap pivots to **broad observability** ("inventory every AI tool, every protocol, across the cluster"), Pixie's capture engine becomes a major accelerant and our narrow agent becomes the limiting factor.
+- For the **specific hard parts** (BoringSSL / Go `crypto/tls` / Node TLSWrap tracing), Pixie is the best reference implementation that exists — borrow the *techniques*, not the codebase.
+
+### Recommendation
+
+Keep the lean, enforcement-first agent; treat Pixie as a **reference, not a base**.
+
+- For capture breadth we lack (multi-runtime TLS), study Pixie's approach and reimplement clean-room in our Apache codebase.
+- Don't fork: GPL entanglement + permanent divergence + system bloat outweigh the head start, precisely because our differentiator (kill) is the one thing Pixie is built never to do.
+
+> One-line version: we could fork Pixie, but our core feature — modifying traffic to kill a call — is something Pixie is built never to do and would never upstream, so we'd own a heavy GPL fork forever. Better to keep the focused agent and borrow Pixie's techniques for the multi-runtime capture we don't have yet.
+
+## 10. Source map for reviewers
 
 | Concern | File |
 | --- | --- |
