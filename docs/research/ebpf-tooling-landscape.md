@@ -121,6 +121,39 @@ We're on `cilium/ebpf`, which is the right choice for a lean Go agent — no CGo
 
 ---
 
+## Feature borrow map — the best of each
+
+The pragmatic plan: take the one or two highest-value ideas from each project, respecting whether the license lets us **reuse code** (MIT) or only **reference the technique and reimplement** (GPL BPF / Apache-with-GPL-BPF). Ordered by value to us.
+
+| # | Borrow this | From | License path | Effort | Why it's worth it |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **Multi-runtime TLS uprobes** (GoTLS, BoringSSL, NSS/GnuTLS, OpenSSL 1.0.2–3.5) + version→offset detection | **eCapture** | **MIT — reuse/adapt** | M–L | Directly closes our Phase G.5 gap (Go/Node/BoringSSL). MIT means we can lift code, not just read it. Single highest-leverage borrow. |
+| 2 | **Override-return kill** (`bpf_override_return` so `SSL_write` fails cleanly) | **Tetragon** | reference technique | S–M | Cleaner kill than buffer corruption — app gets an honest write error, not a confusing server 400. Keep our corruption as fallback for kernels without `CONFIG_BPF_KPROBE_OVERRIDE`. |
+| 3 | **PCAP-NG / SSLKEYLOGFILE export** | **eCapture** | MIT — reuse | S | Optional capture output in a standard format customers/analysts already use; cheap to add given MIT. |
+| 4 | **OpenTelemetry export** of captured spans | **Beyla / OBI** | Apache — reference/reuse | M | Answers the earlier "use OTel instead of raw HTTP uplink" question; standard, vendor-neutral telemetry. |
+| 5 | **Declarative TracingPolicy model** (policy → in-kernel enforcement) | **Tetragon** | reference design | M | Blueprint for when we add per-customer policy CRUD instead of only operator-click kills. |
+| 6 | **BPF-LSM allow/deny + default-posture** pattern | **KubeArmor** | reference design | M | Clean model for per-process / per-socket policy decided in-kernel (no user-space round-trip) — if we add process-scoped controls. |
+| 7 | **Detector/rule engine design** for auto-kill | **Falco / Tracee** | reference design | L | Structure for the future intervention engine; map rules onto the Agents-of-Chaos failure taxonomy. |
+| 8 | **Go `crypto/tls` uprobe via runtime struct offsets** | **Pixie** | reference technique | L | Hardest part of multi-runtime coverage; Pixie's offset approach is the proven reference if eCapture's GoTLS path isn't enough. |
+| 9 | **FD-from-rbio + nested-syscall FD resolution** | **Pixie** | reference technique | M | Only if we ever need real 5-tuple/connection metadata (IPs, ports) rather than the `SSL*` key. |
+| 10 | **Container mount-namespace lib resolution** | **Pixie / eCapture** | reference (Pixie) / reuse (eCapture) | M | When we go multi-container per host — auto-discover libssl inside each container. |
+
+### What we keep as-is (don't borrow)
+
+- **`cilium/ebpf` as the agent runtime** — already the right lean-Go choice; nothing to swap.
+- **Ring buffer transport** — already the modern pick; Pixie's perf buffer is only better for pre-5.8 kernels (add a fallback if a customer needs it, don't switch).
+- **`SSL*`-pointer connection key** — simpler than Pixie's FD machinery and sufficient for LLM-only traffic. Keep unless we need 5-tuple (#9).
+- **On-host PII redaction + content-anchor kill + conversation tracker** — our own differentiators; nothing upstream does these.
+
+### Suggested order of adoption
+
+1. **eCapture multi-runtime TLS (#1)** — biggest capability gain, MIT, unblocks Claude Code / Cursor / Node + Go clients.
+2. **Tetragon override-return (#2)** — small change, cleaner enforcement, immediate quality win.
+3. **OTel export (#4)** and **PCAP export (#3)** — integration/interop wins when a customer asks.
+4. **Policy model (#5/#6)** and **detector engine (#7)** — when we move from operator-click to automated intervention.
+
+The throughline: **borrow capture breadth from eCapture (reusable, MIT), borrow enforcement polish from Tetragon (reference), and keep our own identity/PII/kill core** — which is the part nothing else has.
+
 ## Sources
 
 - eCapture — <https://github.com/gojue/ecapture>, <https://ecapture.cc/>
