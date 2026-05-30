@@ -138,7 +138,7 @@ On `SSL_write` entry, `enforce_if_blocked` checks these and, on a hit, calls `bp
 
 ---
 
-## 8. Code-level deep dive (read both side by side)
+## 7. Code-level deep dive (read both side by side)
 
 Based on a full read of Pixie's `openssl_trace.c`, `socket_trace.c`, and `node_openssl_trace.c`. Here's how the two implementations differ line-for-line.
 
@@ -230,7 +230,7 @@ Pixie is a *general-purpose, multi-runtime, multi-protocol* observability engine
 
 The lesson for our roadmap: when we add BoringSSL/Go/Node coverage (Phase G.5), we inherit Pixie's hard problems — the FD/offset tables and the Node TLSWrap dance are unavoidable there. Their code is the reference implementation to study before we write ours.
 
-## 9. Build-vs-fork: should we extend Pixie instead of maintaining our own agent?
+## 8. Build-vs-fork: should we extend Pixie instead of maintaining our own agent?
 
 A reasonable question given how much capture machinery Pixie already has: rather than grow our own agent, fork Pixie and add the conversation-identity, PII, and kill features on top. Short answer — **technically possible, but the wrong trade for this product.** The detail:
 
@@ -277,7 +277,7 @@ Keep the lean, enforcement-first agent; treat Pixie as a **reference, not a base
 
 > One-line version: we could fork Pixie, but our core feature — modifying traffic to kill a call — is something Pixie is built never to do and would never upstream, so we'd own a heavy GPL fork forever. Better to keep the focused agent and borrow Pixie's techniques for the multi-runtime capture we don't have yet.
 
-## 10. Source map for reviewers
+## 9. Source map for reviewers
 
 | Concern | File |
 | --- | --- |
