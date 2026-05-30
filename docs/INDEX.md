@@ -14,6 +14,7 @@ The documentation hierarchy for the Ollive platform. Start at the README, drop i
 ## Research
 
 - [research/agents-of-chaos.md](./research/agents-of-chaos.md) — primer on the four-layer LLM agent attack taxonomy (input / tool / memory / output). Backs the Phase G runtime-defense premise: why traditional prompt-injection benchmarks miss 30–60% of production failure modes and how Ollive's eBPF agent maps onto each layer.
+- [research/pixie-comparison.md](./research/pixie-comparison.md) — eBPF TLS-tracing comparison between our agent and Pixie (CNCF). Extracts our libssl-probing code, verifies Pixie's approach against its source, and lays out where we match (uprobe-on-library, read-before-encrypt) vs differ (in-kernel enforcement, ring buffer, on-host PII, narrow scope).
 
 ## Historical reference
 
