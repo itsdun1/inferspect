@@ -171,6 +171,42 @@ Inferspect sits between Straiker (pure observation) and Repello (heavy proxy ins
 
 ---
 
+## Does any library follow this taxonomy?
+
+No library is branded an "Agents of Chaos" implementation (it's an academic framing), but the four-layer attack surface is well-covered by the ecosystem — split into two camps, **both of which operate at the application/SDK layer, none at the network/eBPF layer like us.**
+
+### Benchmarks / red-team (test agents against the surface)
+
+| Tool | Layers | Note |
+| --- | --- | --- |
+| **AgentDojo** (ETH, NeurIPS'24) | Tool (L2) | 97 tasks / 629 security cases; dynamic env where tools return malicious data |
+| **InjecAgent** | Tool (L2) | 1,054 indirect-injection cases; 17 user + 62 attacker tools |
+| **Agent Security Bench (ASB)** (ICLR'25) | Input + Tool + Memory (L1–L3) | broadest — includes memory-poisoning |
+| garak (NVIDIA), PyRIT (Microsoft), promptfoo | mostly L1 | general red-team scanners |
+
+### Runtime guardrails (defend at runtime)
+
+| Tool | Layers | Note |
+| --- | --- | --- |
+| **LlamaFirewall** (Meta, OSS) | L1 + reasoning/memory + code | most complete defense: PromptGuard + AlignmentCheck + CodeShield |
+| **NeMo Guardrails** (NVIDIA) | Input + Output | dialogue/topical rails |
+| **LLM Guard** (Protect AI → Palo Alto) | Input + Output | prompt + response scanner middleware |
+| **Invariant Labs** | Tool (L2) + data-flow | Semgrep-style tool-call/data-flow analysis |
+| Guardrails AI / Llama Guard / Prompt Guard | Output / Input | validation / classifier |
+| Rebuff | — | archived May 2025 |
+
+Most complete across the surface: **ASB** (testing) and **LlamaFirewall** (defense).
+
+### Why this is complementary to us, not competitive
+
+Every tool above runs **inside the application / SDK / API** — you import it and wrap your agent, or call a guard endpoint. None observe or enforce at the **kernel/network layer**. So:
+
+- They require app integration (cooperation). We observe + enforce with zero app changes.
+- Their value is **detection logic** (what counts as tool-injection, memory-poisoning, output-bypass). Our value is the **zero-cooperation substrate** to see traffic and stop it.
+- The fusion is our roadmap **intervention engine**: run LlamaFirewall / AgentDojo-style detectors in the agent's user-space, and when one fires, enforce via the kernel kill. They supply "what's bad"; we supply "see it and stop it without touching the app." (Licensing applies — most are Apache/MIT; reference-vs-reuse per repo, same rule as the eBPF tools in `ebpf-tooling-landscape.md`.)
+
+---
+
 ## Honest caveats
 
 - **The "30-60% vulnerable" number is benchmark-dependent.** Models and frameworks vary; the paper measured a specific set of agents on specific tasks. Don't quote it as a universal fact; quote it as "research has shown" or "in benchmark conditions."
@@ -194,3 +230,12 @@ Inferspect sits between Straiker (pure observation) and Repello (heavy proxy ins
 - **What it is:** a 2024 research framing that organizes LLM agent vulnerabilities into four layers (input, tool, memory, output) and shows that 30-60% of production agents fail at the tool layer alone.
 - **Why it matters:** traditional prompt-injection testing only covers Layer 1. Layers 2-4 are where production agents actually break, and they require runtime defense — not pre-deployment testing.
 - **What it means for Inferspect:** validates the runtime-defense premise, defines the detection roadmap, gives a defensible sales narrative.
+- **Tooling status:** the taxonomy is covered by app-layer benchmarks (AgentDojo, ASB) and guardrails (LlamaFirewall, NeMo, LLM Guard) — none at the network/eBPF layer. They're complementary: their detection logic + our zero-cooperation observe-and-kill substrate = the intervention engine.
+
+## Sources
+
+- AgentDojo — <https://arxiv.org/html/2406.13352v3>
+- InjecAgent — <https://arxiv.org/pdf/2403.02691>
+- Agent Security Bench (ASB) — <https://proceedings.iclr.cc/paper_files/paper/2025/file/5750f91d8fb9d5c02bd8ad2c3b44456b-Paper-Conference.pdf>
+- LlamaFirewall — <https://arxiv.org/pdf/2505.03574>
+- NeMo Guardrails / LLM Guard overview — <https://dev.to/agdex_ai/best-ai-agent-security-guardrails-tools-in-2026-llm-guard-vs-nemo-vs-guardrails-ai-5e5d>
