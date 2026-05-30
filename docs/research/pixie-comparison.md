@@ -268,14 +268,25 @@ Pixie is not just the BPF tracer. Running it pulls in Stirling (C++ collector) +
 - If the roadmap pivots to **broad observability** ("inventory every AI tool, every protocol, across the cluster"), Pixie's capture engine becomes a major accelerant and our narrow agent becomes the limiting factor.
 - For the **specific hard parts** (BoringSSL / Go `crypto/tls` / Node TLSWrap tracing), Pixie is the best reference implementation that exists — borrow the *techniques*, not the codebase.
 
+### Two viable paths
+
+This is a genuine build-vs-fork decision, not a foregone conclusion. Both work; they trade different things.
+
+**Path A — keep our own agent, use Pixie as a reference.** Stay lean and enforcement-first; when we need capture breadth we lack (multi-runtime TLS), study Pixie's approach and reimplement clean-room in our Apache codebase.
+- *Pros:* small footprint (~400-line BPF + focused Go binary), no GPL entanglement, full control of the enforcement path, nothing to bend.
+- *Cons:* we re-solve the hard capture problems (BoringSSL/Go/Node offset tables, HTTP2) ourselves, slower to reach Pixie's breadth.
+
+**Path B — fork Pixie as the base, bend it to our needs.** Take Pixie's capture engine and add conversation-identity + PII + the `bpf_probe_write_user` kill on top.
+- *Pros:* inherit broad library/protocol coverage and battle-tested capture immediately; the watching half is largely done.
+- *Cons:* the kill path (`bpf_probe_write_user`) is something Pixie is built never to do and would never accept upstream → **permanent private fork**, so we lose free upstream maintenance on the feature that matters most. Plus GPL-2.0 obligations, and we carry the full Stirling/PEM/Vizier/PxL stack to ship what is really an LLM-kill daemon.
+
 ### Recommendation
 
-Keep the lean, enforcement-first agent; treat Pixie as a **reference, not a base**.
+For the product as scoped today (LLM-HTTPS only, enforcement-first, lightweight daemon), **Path A is the better fit** — our differentiator is the kill, and that's exactly the part forking makes heavier rather than easier. Path B becomes the right call only if the roadmap pivots toward **broad observability** (inventory every AI tool / protocol across a cluster), where Pixie's capture breadth outweighs the fork cost.
 
-- For capture breadth we lack (multi-runtime TLS), study Pixie's approach and reimplement clean-room in our Apache codebase.
-- Don't fork: GPL entanglement + permanent divergence + system bloat outweigh the head start, precisely because our differentiator (kill) is the one thing Pixie is built never to do.
+The pragmatic middle, regardless of path: **reference Pixie's code for the hard multi-runtime parts and reimplement clean-room** (read to learn the technique; don't copy GPL source into our Apache repo). That captures most of the head-start value with none of the fork or licensing baggage.
 
-> One-line version: we could fork Pixie, but our core feature — modifying traffic to kill a call — is something Pixie is built never to do and would never upstream, so we'd own a heavy GPL fork forever. Better to keep the focused agent and borrow Pixie's techniques for the multi-runtime capture we don't have yet.
+> One-line version: both forking Pixie and extending our own agent are viable. Our core feature — modifying traffic to kill a call — is the one thing Pixie is built never to do, so forking means owning a permanent GPL fork of a large system to use a fraction of it. Unless we pivot to broad observability, the better path is keeping the focused agent and reimplementing Pixie's multi-runtime capture techniques clean-room.
 
 ## 9. Source map for reviewers
 
