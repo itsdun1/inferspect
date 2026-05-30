@@ -1,6 +1,6 @@
 # Inferspect agent vs Pixie — eBPF TLS tracing comparison
 
-A focused comparison of *how the two probe libssl and move plaintext to user-space*, plus where the designs diverge. Written for the Mohit thread: "extract the code specific to the library + probing in this repo and do a comparative analysis vs Pixie."
+A focused comparison of *how the two probe libssl and move plaintext to user-space*, plus where the designs diverge. Scope: extract the library/probing-specific code in the Inferspect agent and compare it, at both the architecture and code level, against Pixie's eBPF TLS tracer.
 
 Pixie (px.dev) is the relevant open-source reference — CNCF project, originally Pixie Labs / New Relic. Its data collector is **Stirling**. Reference: <https://docs.px.dev/about-pixie/pixie-ebpf/> and the source at `github.com/pixie-io/pixie` (`src/stirling`).
 
@@ -114,7 +114,7 @@ On `SSL_write` entry, `enforce_if_blocked` checks these and, on a hit, calls `bp
 
 ## 3. What we deliberately do the same
 
-1. **uprobe-on-library, not kprobe-on-syscall, for TLS.** This is *the* core Pixie technique and the reason both can read plaintext from encrypted connections without touching keys or terminating TLS. Mohit's note "we did the same thing and used the client library" is accurate — we attach to the same `SSL_write`/`SSL_read` API surface.
+1. **uprobe-on-library, not kprobe-on-syscall, for TLS.** This is *the* core Pixie technique and the reason both can read plaintext from encrypted connections without touching keys or terminating TLS. We attach to the same `SSL_write`/`SSL_read` API surface — confirmed against Pixie's `openssl_trace.c`.
 2. **Read-before-encrypt / read-after-decrypt timing.** Entry probe for writes (plaintext is the input arg), return probe for reads (plaintext is in the output buffer after the call).
 3. **User-space protocol parsing.** Both keep BPF dumb (just copy bytes) and parse HTTP/JSON in user-space, because the verifier can't safely walk arbitrary protocol grammars.
 
@@ -132,15 +132,15 @@ On `SSL_write` entry, `enforce_if_blocked` checks these and, on a hit, calls `bp
 - **Container/node auto-discovery.** Pixie resolves libs across every container's mount namespace on a node automatically. We attach to one libssl path on one host.
 - **Protocol breadth + battle-testing.** Years of production hardening, CNCF review, a parser for nearly every wire protocol. We have one HTTP/JSON path.
 
-## 6. One-paragraph takeaway for the thread
+## 6. One-paragraph takeaway
 
-> We use the same fundamental eBPF technique as Pixie — uprobes on libssl's `SSL_write`/`SSL_read`, args stashed in a per-`pid_tgid` hash, plaintext read via `bpf_probe_read_user` before encryption / after decryption — so the "we did the same thing with the client library" framing is exactly correct; I verified it against Pixie's `openssl_trace.c`. Where we diverge is intent. Pixie is read-only observability with broad coverage (OpenSSL + BoringSSL/Go + Node, HTTP2/gRPC + ~12 protocols), correlates each TLS read to a socket FD pulled out of `ssl->rbio->num` via per-version offset tables, and ships over perf buffers. We are a narrow, single-purpose runtime-defense agent — LLM HTTPS only, key on the `SSL*` pointer (no offset tables to maintain), ring-buffer transport, on-host PII redaction, and crucially **in-kernel enforcement** (`bpf_probe_write_user` to kill a conversation) which Pixie does not and will not do. Pixie is the better reference for *capture breadth*; our differentiator is *acting on what we capture*. The clearest thing to borrow next is their BoringSSL/Go-TLS + Node TLSWrap tracing — that's our Phase G.5 gap, and their offset-table approach is the proven blueprint.
+> Inferspect uses the same fundamental eBPF technique as Pixie — uprobes on libssl's `SSL_write`/`SSL_read`, args stashed in a per-`pid_tgid` hash, plaintext read via `bpf_probe_read_user` before encryption / after decryption (verified against Pixie's `openssl_trace.c`). Where the two diverge is intent. Pixie is read-only observability with broad coverage (OpenSSL + BoringSSL/Go + Node, HTTP2/gRPC + ~12 protocols), correlates each TLS read to a socket FD pulled out of `ssl->rbio->num` via per-version offset tables, and ships over perf buffers. Inferspect is a narrow, single-purpose runtime-defense agent — LLM HTTPS only, keys on the `SSL*` pointer (no offset tables to maintain), ring-buffer transport, on-host PII redaction, and crucially **in-kernel enforcement** (`bpf_probe_write_user` to kill a conversation) which Pixie does not and will not do. Pixie is the better reference for *capture breadth*; Inferspect's differentiator is *acting on what it captures*. The clearest thing to borrow next is their BoringSSL/Go-TLS + Node TLSWrap tracing — the Phase G.5 gap — where their offset-table approach is the proven blueprint.
 
 ---
 
 ## 8. Code-level deep dive (read both side by side)
 
-I read Pixie's `openssl_trace.c`, `socket_trace.c`, and `node_openssl_trace.c` in full. Here's how the two implementations actually differ line-for-line.
+Based on a full read of Pixie's `openssl_trace.c`, `socket_trace.c`, and `node_openssl_trace.c`. Here's how the two implementations differ line-for-line.
 
 ### 8a. Probe surface — 6 programs vs ~12+
 
