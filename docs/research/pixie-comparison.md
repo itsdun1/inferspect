@@ -138,7 +138,99 @@ On `SSL_write` entry, `enforce_if_blocked` checks these and, on a hit, calls `bp
 
 ---
 
-## 7. Source map for reviewers
+## 8. Code-level deep dive (read both side by side)
+
+I read Pixie's `openssl_trace.c`, `socket_trace.c`, and `node_openssl_trace.c` in full. Here's how the two implementations actually differ line-for-line.
+
+### 8a. Probe surface — 6 programs vs ~12+
+
+**Ours** (`loader.go`): 6 uprobe programs — `SSL_write` entry, `SSL_read` entry+return, and the `_ex` variants of each (optional). One job each: capture, and for SSL_write, enforce.
+
+**Pixie** (`openssl_trace.c`): **12 SSL probe entrypoints** plus Node-specific ones. For each of write/read it ships *two complete FD-resolution strategies*, each hooking entry **and** return:
+
+- `probe_entry_SSL_write` / `probe_ret_SSL_write` — "symaddrs" strategy
+- `probe_entry_SSL_write_syscall_fd_access` / `probe_ret_..._syscall_fd_access` — "nested syscall" strategy
+- ditto for read, ditto for `_ex`
+
+Why so many: Pixie *must* recover the socket FD to correlate TLS plaintext with its connection-tracking layer. We don't — we key on the `SSL*` pointer and never need the FD. That single decision erases half their probe surface.
+
+### 8b. The FD problem Pixie has and we don't
+
+Pixie's `get_fd()` tries three things in order (`openssl_trace.c:96`):
+
+```c
+fd = get_fd_node(tgid, ssl);       // node: FD from a separate TLSWrap uprobe
+if (fd > 2) return fd;
+fd = get_fd_symaddrs(tgid, ssl);   // ssl->rbio->num via per-version offsets
+if (fd > 2) return fd;
+return kInvalidFD;
+```
+
+`get_fd_symaddrs` walks raw struct memory:
+
+```c
+// Extract FD via ssl->rbio->num.
+const void** rbio_ptr_addr = ssl + symaddrs->SSL_rbio_offset;
+const void* rbio_ptr = *rbio_ptr_addr;
+const int* rbio_num_addr = rbio_ptr + symaddrs->RBIO_num_offset;
+const int rbio_num = *rbio_num_addr;
+return rbio_num;
+```
+
+Those offsets (`SSL_rbio_offset`, `RBIO_num_offset`) are populated **per OpenSSL version** from user-space (`openssl_symaddrs_map`, keyed by TGID). When that fails (newer OpenSSL/BoringSSL where the layout is opaque), they fall back to the **nested-syscall** strategy: on SSL_write entry they seed `ssl_user_space_call_map[pid_tgid]`, a kprobe on the real `write`/`sendto` syscall fired *during* SSL_write records the FD into it, and SSL_write's return probe reads it back — with `mismatched_fds` detection for when the heuristic is wrong.
+
+**This is the single biggest complexity asymmetry.** Pixie carries version-keyed struct-offset tables + a nested-syscall fallback + mismatch detection, all to get an FD. Our `SSL*`-as-key approach needs none of it — at the cost of not having the 5-tuple (which we don't need for LLM-only traffic).
+
+### 8c. Plaintext copy — masking trick vs volatile-asm trick
+
+Both fight the same enemy: the BPF verifier rejecting a variable-length `bpf_probe_read`. Different workarounds.
+
+**Ours** (`emit_event`): one power-of-two mask, one copy, one event.
+
+```c
+__u32 cap = ((__u32)num) & (MAX_PAYLOAD - 1);   // proves 0 ≤ cap < 8192 in one op
+bpf_probe_read_user(&ev->payload, cap, buf);
+bpf_ringbuf_submit(ev, 0);
+```
+
+Trade-off we documented: if `num` is an exact multiple of 8192 the cap collapses to 0 (we lose that one capture; `total` still records true size). Simple, one shot, ≤8 KiB.
+
+**Pixie** (`perf_submit_buf`): handles up to **30 KiB** (`MAX_MSG_SIZE`) and chunks larger payloads across multiple perf events via an unrolled `CHUNK_LIMIT` loop (`perf_submit_wrapper`). To get there past the 4.14 verifier they resort to:
+
+```c
+size_t buf_size_minus_1 = buf_size - 1;
+asm volatile("" : "+r"(buf_size_minus_1) :);   // stop clang optimizing away verifier hints
+buf_size = buf_size_minus_1 + 1;
+if (buf_size_minus_1 < MAX_MSG_SIZE) { bpf_probe_read(&event->msg, buf_size, buf); ... }
+else if (buf_size_minus_1 < 0x7fffffff) { bpf_probe_read(&event->msg, MAX_MSG_SIZE, buf); ... }
+```
+
+That `asm volatile` is a famous Pixie hack — clang was "too smart" and optimized away the `if` hints the verifier needed, so they launder the variable through inline asm to force the verifier to re-reason about its bounds. We avoid the whole class of problem by capping smaller and never chunking.
+
+### 8d. Capture vs enforce — the structural difference
+
+Pixie's probes are pure observers. `probe_entry_SSL_write` does exactly one mutation to shared state: `set_conn_as_ssl(tgid, fd, ...)` — marks the connection so the *syscall-level* tracer doesn't double-capture the ciphertext. It never touches the application's buffer.
+
+Ours does the same capture, then adds the thing Pixie structurally refuses to do:
+
+```c
+// enforce_if_blocked, on a hit:
+bpf_probe_write_user((void *)buf, &zero, 1);   // corrupt the outbound request
+```
+
+`bpf_probe_write_user` is gated behind `CAP_SYS_ADMIN` and is exactly the helper an observability tool would never call. It's our entire product thesis in one line.
+
+### 8e. Dedup between layers — a problem we don't have
+
+Because Pixie traces **both** the TLS library (plaintext) **and** the raw syscalls (everything), it has to prevent counting the same bytes twice. That's what `set_conn_as_ssl` is for — once a connection is known-TLS, the syscall tracer suppresses its (encrypted) bytes and lets the uprobe layer own it. We only ever have the uprobe layer, so there's no dedup machinery at all.
+
+### 8f. What this means
+
+Pixie is a *general-purpose, multi-runtime, multi-protocol* observability engine, and its code shows it: version-keyed offset tables, dual FD strategies, nested-syscall detection, chunked 30 KiB submission, layer dedup, Node TLSWrap handling. Every one of those is the right call for "trace anything on any node" — and every one is complexity we get to skip by being *LLM-HTTPS-only and enforcement-first*. Our `ssl_uprobe.c` is ~400 lines total including the kill path; their socket tracer is several thousand across many files.
+
+The lesson for our roadmap: when we add BoringSSL/Go/Node coverage (Phase G.5), we inherit Pixie's hard problems — the FD/offset tables and the Node TLSWrap dance are unavoidable there. Their code is the reference implementation to study before we write ours.
+
+## 9. Source map for reviewers
 
 | Concern | File |
 | --- | --- |
