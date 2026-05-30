@@ -154,6 +154,27 @@ The pragmatic plan: take the one or two highest-value ideas from each project, r
 
 The throughline: **borrow capture breadth from eCapture (reusable, MIT), borrow enforcement polish from Tetragon (reference), and keep our own identity/PII/kill core** — which is the part nothing else has.
 
+## Conversation identity — is our approach available anywhere else?
+
+Our agent tags every captured call with a conversation identity derived purely from content (no app cooperation):
+
+1. **Content-prefix fingerprint** = `SHA256(canonicalize(system + first_user))` — stable across all turns of one chat.
+2. **Rolling-hash chain** over the message history — recognizes "turn N+1 of an existing chat" and separates parallel conversations that started identically.
+
+Researched whether any library provides this. **It does not** — every other approach gets conversation identity from an *explicit ID*, which requires the cooperation our daemon-only model avoids:
+
+| Approach | How it gets conversation/session ID | Cooperation needed |
+| --- | --- | --- |
+| **Langfuse / LangSmith / Helicone** | app/SDK passes `session_id` / `thread_id` (e.g. Langfuse `propagate_attributes(session_id=…)`) | ✅ app sets it |
+| **OpenTelemetry GenAI** (`gen_ai.conversation.id`) | populated "when readily available" — framework-managed history, or backend (OpenAI Assistants threads, Bedrock sessions), or developer-set | ✅ framework/app/backend |
+| **eBPF observability** (Pixie, Beyla, DeepFlow) | transport-level only — 5-tuple connection + request↔response stitching; no multi-turn concept | n/a (wrong layer) |
+| **Provider prompt-caching** (OpenAI/Anthropic) | content-prefix hashing — *the same idea we use* | internal to provider, not a library |
+| **Portkey / LiteLLM** proxy fallback | content fingerprint as a fallback | ✅ proxy mode (`OPENAI_BASE_URL` change) |
+
+**Conclusion:** content-derived conversation identity, observed passively at the TLS layer, with rolling-hash continuation to disambiguate parallel chats, is **our own** — no open library offers it. The underlying idea (content-prefix hashing) is what providers use internally for prompt caching and what proxies use as a fallback, but neither is reusable as a dependency. This is a genuine differentiator, not a borrow candidate.
+
+Honest caveat (already in the Phase G plan): content-prefix identity has a known collision case — two conversations with byte-identical `(system, first_user)` share a fingerprint. The rolling-hash chain reduces this once they diverge, but the first turn is ambiguous. The cooperation-based approaches above don't have this problem precisely because they're handed a unique ID — that's the tradeoff we accept for zero-touch install.
+
 ## Sources
 
 - eCapture — <https://github.com/gojue/ecapture>, <https://ecapture.cc/>
@@ -161,3 +182,5 @@ The throughline: **borrow capture breadth from eCapture (reusable, MIT), borrow 
 - KubeArmor — <https://kubearmor.io/>, <https://docs.kubearmor.io/kubearmor/quick-links/kubearmor_overview/runtime_enforcer>
 - Grafana Beyla / OBI — <https://grafana.com/oss/beyla-ebpf/>, <https://github.com/grafana/beyla>
 - Pixie eBPF TLS tracing background — <https://blog.px.dev/ebpf-tls-tracing-past-present-future/>
+- Langfuse sessions — <https://langfuse.com/docs/observability/features/sessions>
+- OpenTelemetry GenAI semantic conventions — <https://opentelemetry.io/docs/specs/semconv/gen-ai/>
